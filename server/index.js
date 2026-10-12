@@ -1,0 +1,78 @@
+// Serves the built app (dist/) and the real-time sync endpoint at /ws/<room>.
+
+import { createServer } from 'node:http';
+import { readFile } from 'node:fs/promises';
+import { extname, join, normalize } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { WebSocketServer } from 'ws';
+import { RoomManager, ROOM_NAME } from './rooms.js';
+
+const ROOT = fileURLToPath(new URL('..', import.meta.url));
+const DIST = join(ROOT, 'dist');
+const PORT = Number(process.env.PORT) || 3000;
+
+const MIME = {
+  '.html': 'text/html; charset=utf-8',
+  '.js': 'text/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.svg': 'image/svg+xml',
+  '.png': 'image/png',
+  '.woff2': 'font/woff2',
+};
+
+export function startServer({ port = PORT, dataDir = process.env.COPROD_DATA ?? join(ROOT, 'data', 'rooms') } = {}) {
+  const rooms = new RoomManager({ dataDir });
+
+  const server = createServer(async (req, res) => {
+    const path = decodeURIComponent(new URL(req.url, 'http://x').pathname);
+    if (path === '/healthz') return res.end('ok');
+    const file = normalize(join(DIST, path === '/' ? 'index.html' : path));
+    if (!file.startsWith(DIST)) {
+      res.writeHead(403);
+      return res.end();
+    }
+    try {
+      const body = await readFile(file);
+      const long = path.startsWith('/assets/'); // hashed file names from Vite
+      res.writeHead(200, {
+        'content-type': MIME[extname(file)] ?? 'application/octet-stream',
+        'cache-control': long ? 'public, max-age=31536000, immutable' : 'no-cache',
+      });
+      res.end(body);
+    } catch {
+      try {
+        res.writeHead(200, { 'content-type': MIME['.html'], 'cache-control': 'no-cache' });
+        res.end(await readFile(join(DIST, 'index.html')));
+      } catch {
+        res.writeHead(503, { 'content-type': 'text/plain' });
+        res.end('App not built yet. Run `npm run build` first (or `npm run dev` while developing).');
+      }
+    }
+  });
+
+  const wss = new WebSocketServer({ noServer: true, maxPayload: 2 * 1024 * 1024 });
+  server.on('upgrade', (req, socket, head) => {
+    const m = new URL(req.url, 'http://x').pathname.match(/^\/ws\/(.+)$/);
+    if (!m || !ROOM_NAME.test(m[1])) return socket.destroy();
+    wss.handleUpgrade(req, socket, head, (ws) => rooms.connect(ws, m[1]));
+  });
+
+  return new Promise((resolve) =>
+    server.listen(port, () =>
+      resolve({
+        port: server.address().port,
+        rooms,
+        async close() {
+          for (const ws of wss.clients) ws.terminate();
+          await rooms.closeAll();
+          await new Promise((r) => server.close(r));
+        },
+      }),
+    ),
+  );
+}
+
+if (process.argv[1] === fileURLToPath(import.meta.url)) {
+  const { port } = await startServer();
+  console.log(`coprod listening on http://localhost:${port}`);
+}

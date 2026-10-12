@@ -1,0 +1,785 @@
+:root {
+  --bg: #121419;
+  --panel: #1a1d24;
+  --panel2: #20242d;
+  --line: #2c313c;
+  --text: #e9ecf3;
+  --muted: #8b92a5;
+  --accent: #ff8a3d;
+  --danger: #ff6b6b;
+  --step: 28px;
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.4 Inter, system-ui, -apple-system, 'Segoe UI', sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+button,
+input,
+select {
+  font: inherit;
+  color: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+[hidden] {
+  display: none !important;
+}
+
+.hint {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 400;
+}
+
+/* ---------------------------------------------------------------- top bar */
+
+.top {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 16px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+  flex-wrap: wrap;
+  position: sticky;
+  top: 0;
+  z-index: 10;
+}
+
+.brand {
+  font-weight: 700;
+  font-size: 18px;
+  letter-spacing: -0.03em;
+  color: var(--muted);
+  text-decoration: none;
+}
+
+.brand b,
+.modal h1 b {
+  color: var(--accent);
+}
+
+.title {
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  padding: 6px 8px;
+  font-weight: 600;
+  min-width: 0;
+  width: 200px;
+}
+
+.title:hover,
+.title:focus {
+  border-color: var(--line);
+  outline: none;
+}
+
+.transport {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.play {
+  width: 40px;
+  height: 36px;
+  border-radius: 10px;
+  border: 0;
+  background: var(--accent);
+  display: grid;
+  place-items: center;
+}
+
+.play svg {
+  width: 18px;
+  height: 18px;
+  fill: #1a0f06;
+}
+
+.play .i-stop,
+body.playing .play .i-play {
+  display: none;
+}
+
+body.playing .play .i-stop {
+  display: block;
+}
+
+.seg {
+  display: flex;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 2px;
+}
+
+.seg button {
+  background: none;
+  border: 0;
+  padding: 6px 10px;
+  border-radius: 8px;
+  color: var(--muted);
+}
+
+.seg button.on {
+  background: var(--panel2);
+  color: var(--text);
+}
+
+.bpm {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.bpm input {
+  width: 58px;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 6px 8px;
+  font-family: 'JetBrains Mono', monospace;
+  text-align: center;
+}
+
+.history {
+  display: flex;
+  gap: 4px;
+}
+
+.history button,
+.ghost {
+  background: var(--panel2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 6px 10px;
+}
+
+.ghost.danger {
+  color: var(--danger);
+}
+
+.people {
+  display: flex;
+  margin-left: auto;
+}
+
+.avatar {
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  background: var(--c);
+  color: #111;
+  font-weight: 700;
+  font-size: 13px;
+  border: 2px solid var(--panel);
+  margin-left: -6px;
+}
+
+.share {
+  background: var(--text);
+  color: var(--bg);
+  border: 0;
+  border-radius: 10px;
+  padding: 8px 14px;
+  font-weight: 600;
+}
+
+/* ---------------------------------------------------------------- patterns */
+
+.patterns {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--line);
+  flex-wrap: wrap;
+}
+
+.tabs {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.tab {
+  background: none;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 6px 12px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--muted);
+}
+
+.tab.on {
+  border-color: var(--accent);
+  color: var(--text);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+.tab i {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+}
+
+.pattern-tools {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.pattern-tools label {
+  color: var(--muted);
+  font-size: 12px;
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+select {
+  background: var(--panel2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 5px 8px;
+}
+
+/* ---------------------------------------------------------------- rack */
+
+main {
+  padding: 14px 16px 40px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.rack-wrap {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  overflow-x: auto;
+}
+
+.rack {
+  display: flex;
+  flex-direction: column;
+  min-width: max-content;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--line);
+  position: relative;
+  transition: box-shadow 0.2s;
+}
+
+.row.busy {
+  box-shadow: inset 3px 0 0 var(--who);
+}
+
+.row.selected {
+  background: color-mix(in srgb, var(--ch) 7%, transparent);
+}
+
+.row.muted .lane {
+  opacity: 0.35;
+}
+
+.ctrl {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  position: sticky;
+  left: 0;
+  background: var(--panel);
+  z-index: 1;
+  padding-right: 4px;
+}
+
+.row.selected .ctrl {
+  background: color-mix(in srgb, var(--ch) 7%, var(--panel));
+}
+
+.color {
+  width: 4px;
+  height: 30px;
+  border-radius: 2px;
+  background: var(--ch);
+}
+
+.mini {
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  background: var(--panel2);
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--muted);
+  padding: 0;
+}
+
+.mute.on {
+  background: var(--danger);
+  color: #1a0808;
+  border-color: var(--danger);
+}
+
+.solo.on {
+  background: #ffd23f;
+  color: #1a1505;
+  border-color: #ffd23f;
+}
+
+.del {
+  background: none;
+  border-color: transparent;
+}
+
+.del:hover {
+  color: var(--danger);
+}
+
+.namebox {
+  display: flex;
+  flex-direction: column;
+  width: 104px;
+}
+
+.name {
+  background: none;
+  border: 0;
+  padding: 0 2px;
+  font-weight: 600;
+  width: 100%;
+  text-overflow: ellipsis;
+}
+
+.name:focus {
+  outline: 1px solid var(--line);
+  border-radius: 4px;
+}
+
+.inst {
+  border: 0;
+  background: none;
+  padding: 0;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+input[type='range'] {
+  accent-color: var(--ch, var(--accent));
+}
+
+.vol {
+  width: 70px;
+}
+
+.pan {
+  width: 44px;
+}
+
+.lane {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.steps {
+  display: flex;
+  gap: 3px;
+}
+
+.step {
+  width: var(--step);
+  height: 34px;
+  border-radius: 6px;
+  border: 0;
+  background: #2a2f3a;
+  padding: 0;
+  touch-action: none;
+  transition: background 0.06s;
+}
+
+.step.alt {
+  background: #22262f;
+}
+
+.step:nth-child(4n + 1) {
+  margin-left: 4px;
+}
+
+.step:first-child {
+  margin-left: 0;
+}
+
+.step.on {
+  background: var(--ch);
+  box-shadow: 0 0 10px color-mix(in srgb, var(--ch) 45%, transparent);
+}
+
+.step.now {
+  outline: 2px solid rgba(255, 255, 255, 0.55);
+  outline-offset: -2px;
+}
+
+.step.on.now {
+  filter: brightness(1.35);
+}
+
+.miniroll {
+  width: calc(var(--step) * 16 + 3px * 15 + 12px);
+  height: 34px;
+  border-radius: 6px;
+  background: #1d2129;
+  cursor: pointer;
+}
+
+.badges {
+  position: absolute;
+  right: 4px;
+  top: -8px;
+  display: flex;
+  gap: 4px;
+  pointer-events: none;
+}
+
+.who {
+  background: var(--c);
+  color: #111;
+  font-size: 10px;
+  font-weight: 700;
+  padding: 1px 6px;
+  border-radius: 999px;
+}
+
+.rack-foot {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px;
+  position: sticky;
+  left: 0;
+}
+
+/* ---------------------------------------------------------------- piano roll */
+
+.roll-panel {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  overflow: hidden;
+}
+
+.roll-panel header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line);
+  flex-wrap: wrap;
+}
+
+.roll-panel h2 {
+  font-size: 14px;
+  margin: 0;
+}
+
+.roll-panel header .ghost {
+  margin-left: auto;
+}
+
+.swatch {
+  width: 12px;
+  height: 12px;
+  border-radius: 3px;
+}
+
+.roll {
+  height: min(420px, 55vh);
+  overflow: auto;
+  position: relative;
+}
+
+.roll-inner {
+  display: flex;
+  width: max-content;
+}
+
+.roll .keys {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  cursor: pointer;
+}
+
+.roll .grid {
+  touch-action: none;
+  cursor: crosshair;
+}
+
+/* ---------------------------------------------------------------- song */
+
+.song h3 {
+  margin: 0 0 8px;
+  font-size: 13px;
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+}
+
+.song-row {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.song-strip {
+  display: flex;
+  gap: 4px;
+  flex: 1;
+  min-width: 240px;
+  min-height: 36px;
+  align-items: center;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 4px;
+  overflow-x: auto;
+}
+
+.song-chip {
+  flex: 1 1 0;
+  min-width: 90px;
+  max-width: 220px;
+  height: 28px;
+  border-radius: 6px;
+  border: 0;
+  background: var(--panel2);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 8px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.song-chip b {
+  color: var(--muted);
+  font-weight: 400;
+  padding-left: 6px;
+}
+
+.song-chip.now {
+  background: color-mix(in srgb, var(--accent) 30%, var(--panel2));
+}
+
+/* ---------------------------------------------------------------- overlays */
+
+.modal {
+  position: fixed;
+  inset: 0;
+  background: rgba(8, 9, 12, 0.72);
+  backdrop-filter: blur(4px);
+  display: grid;
+  place-items: center;
+  z-index: 50;
+  padding: 16px;
+}
+
+.card {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  padding: 22px;
+  width: min(380px, 100%);
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.card h1 {
+  margin: 0;
+  font-size: 26px;
+  letter-spacing: -0.03em;
+  color: var(--muted);
+}
+
+.card p {
+  margin: 0;
+  color: var(--muted);
+}
+
+.card label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.card input {
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 10px 12px;
+  font-size: 15px;
+}
+
+.colors {
+  display: flex;
+  gap: 8px;
+}
+
+.colors button {
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  border: 2px solid transparent;
+}
+
+.colors button.on {
+  border-color: var(--text);
+  box-shadow: 0 0 0 2px var(--panel);
+}
+
+.primary {
+  background: var(--accent);
+  color: #1a0f06;
+  border: 0;
+  border-radius: 10px;
+  padding: 11px;
+  font-weight: 700;
+}
+
+.status {
+  position: fixed;
+  top: 64px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--panel2);
+  border: 1px solid var(--line);
+  padding: 6px 14px;
+  border-radius: 999px;
+  font-size: 12px;
+  display: none;
+  z-index: 20;
+}
+
+.status.show {
+  display: block;
+}
+
+#toast {
+  position: fixed;
+  bottom: 20px;
+  left: 50%;
+  transform: translate(-50%, 16px);
+  opacity: 0;
+  pointer-events: none;
+  background: var(--panel2);
+  border: 1px solid var(--line);
+  padding: 9px 16px;
+  border-radius: 999px;
+  transition: 0.2s;
+  max-width: calc(100% - 32px);
+  z-index: 60;
+}
+
+#toast.show {
+  opacity: 1;
+  transform: translate(-50%, 0);
+}
+
+@media (max-width: 640px) {
+  /* Stack each row: controls on top, a full-width step lane below. */
+  .row {
+    flex-wrap: wrap;
+    row-gap: 6px;
+  }
+  .ctrl {
+    position: static;
+    flex: 1 1 auto;
+  }
+  .row .del {
+    order: 1;
+  }
+  .lane {
+    order: 2;
+    flex-basis: 100%;
+    overflow-x: auto;
+  }
+  .steps {
+    flex: 1;
+    gap: 2px;
+  }
+  .step {
+    flex: 1 0 18px;
+    width: auto;
+    height: 32px;
+    border-radius: 5px;
+  }
+  .step:nth-child(4n + 1) {
+    margin-left: 3px;
+  }
+  .miniroll {
+    width: 100%;
+  }
+  .rack {
+    min-width: 0;
+  }
+  .top {
+    gap: 8px;
+  }
+  .title {
+    width: 130px;
+  }
+  .people {
+    margin-left: 0;
+  }
+  .pattern-tools {
+    margin-left: 0;
+  }
+  .vol {
+    width: 52px;
+  }
+  .pan {
+    display: none;
+  }
+  .rack-foot .hint,
+  .roll-panel .hint {
+    display: none;
+  }
+}
