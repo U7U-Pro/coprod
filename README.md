@@ -40,8 +40,9 @@ npm start          # serves dist/ and the sync socket on $PORT (default 3000)
 - **Plugins** ([Web Audio Modules 2.0](https://www.webaudiomodules.com/)): add plugin
   instruments and stack plugin effects on any channel (the **FX** button). The plugin's
   own interface appears in the channel panel, and turning its knobs updates everyone's
-  copy. Two example plugins ship with coprod (**Acid** synth and **Echo** delay), and
-  any WAM can be added by URL.
+  copy. Bundled: **Dexed** (the open-source DX7 emulator, compiled to WebAssembly,
+  with its 1,000+ voices), plus small **Acid** synth and **Echo** delay examples. Any
+  WAM can be added by URL.
 - **Multiplayer**: live edits, avatars, colored name tags on the channel each
   person is working on, live cursors in the piano roll, dots on the pattern tabs
   showing who's where.
@@ -72,7 +73,11 @@ browser ── edits (Yjs updates) ──► server/rooms.js ──► every oth
   plugin instruments (driven with MIDI events) and per-channel effect chains.
 - `src/plugins.js`: loading WAM plugins, and the per-person "allow this site" list.
 - `src/channelpanel.js`: the FX panel; mounts plugin GUIs and shares their settings.
-- `public/wam/`: the two example plugins, written against the plain WAM interface.
+- `public/wam/`: the bundled plugins, written against the plain WAM interface.
+- `plugins/dexed/`: the Dexed port: Dexed's engine source (GPLv3), the small shims
+  that replace JUCE, a C interface (`dexed_wasm.cpp`), and `build.sh` to rebuild
+  `public/wam/dexed/dexed.wasm` with clang's WebAssembly target. **Dexed is GPLv3**:
+  if you publish coprod with Dexed in it, publish this folder's source too.
 - `server/samples.js`: sample upload/download, stored by SHA-256 of the file.
 - `src/instruments.js`: the synthesized instruments.
 - `src/rack.js`, `src/pianoroll.js`, `src/main.js`: the UI.

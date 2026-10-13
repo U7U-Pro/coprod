@@ -10,6 +10,7 @@ import initializeWamHost from '@webaudiomodules/sdk/src/initializeWamHost.js';
 
 /** Plugins that ship with coprod. Anything else can be added by URL. */
 export const CATALOG = [
+  { url: '/wam/dexed/index.js', name: 'Dexed', type: 'instrument', about: 'DX7 FM synth (Dexed, GPL) with 1,000+ classic voices' },
   { url: '/wam/coprod-acid/index.js', name: 'Acid', type: 'instrument', about: 'Squelchy synth with a resonant filter' },
   { url: '/wam/coprod-echo/index.js', name: 'Echo', type: 'effect', about: 'Tempo-synced feedback delay' },
 ];

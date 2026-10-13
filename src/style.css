@@ -813,7 +813,7 @@ body.dropping .drop-hint {
 
 .cp-body {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
   gap: 1px;
   background: var(--line);
 }

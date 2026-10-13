@@ -250,6 +250,61 @@ try {
   await ben.screenshot({ path: `${SHOTS}6-ben-plugins.png` });
   await ana.screenshot({ path: `${SHOTS}7-ana-rack.png`, fullPage: true });
 
+  // ---- Dexed (the DX7 engine compiled to WebAssembly) ----------------------
+  await ana.click('#play').catch(() => {});
+  await ana.click('#play').catch(() => {}); // make sure transport is stopped
+  if (await ana.evaluate(() => window.coprod.engine.playing)) await ana.click('#play');
+  await ana.selectOption('#addChannel', '__plugin');
+  await ana.click('.picker-item:has-text("Dexed")');
+  await ana.waitForFunction(() => /\d\d \S/.test(document.querySelector('#channelPanel .dx-lcd')?.textContent ?? ''), null, { timeout: 15000 });
+  const dxId = await ana.evaluate(() => window.coprod.ui.project.channels.find((c) => c.plugin?.name === 'Dexed').id);
+  const lcd = await ana.textContent('#channelPanel .dx-lcd');
+  step(`Dexed loads in the browser and shows its first voice: "${lcd.trim()}"`);
+
+  // Play a chord straight into it and measure the output level.
+  const level = await ana.evaluate(async (id) => {
+    const { engine } = window.coprod;
+    const node = engine.slots.get(id).node;
+    const an = engine.ctx.createAnalyser();
+    an.fftSize = 2048;
+    node.connect(an);
+    const t = engine.ctx.currentTime + 0.05;
+    for (const n of [57, 60, 64]) node.scheduleEvents({ type: 'wam-midi', time: t, data: { bytes: [0x90, n, 100] } });
+    await new Promise((r) => setTimeout(r, 400));
+    const buf = new Float32Array(an.fftSize);
+    an.getFloatTimeDomainData(buf);
+    for (const n of [57, 60, 64]) node.scheduleEvents({ type: 'wam-midi', time: engine.ctx.currentTime, data: { bytes: [0x80, n, 0] } });
+    node.disconnect(an);
+    return Math.sqrt(buf.reduce((s, x) => s + x * x, 0) / buf.length);
+  }, dxId);
+  if (!(level > 0.005)) throw new Error(`Dexed is silent (rms ${level})`);
+  step(`Playing a chord into Dexed produces sound (rms ${level.toFixed(3)})`);
+
+  // Ana picks another voice from the bank; Ben's Dexed switches too.
+  await ana.click('#channelPanel .dx-voices button:nth-child(6)');
+  const wantName = (await ana.textContent('#channelPanel .dx-voices button:nth-child(6)')).slice(2).trim();
+  await ben.waitForFunction((id) => window.coprod.engine.slotStatus(id).status === 'ready', dxId, { timeout: 15000 });
+  await ben.waitForFunction(
+    ({ id, want }) => {
+      const p = window.coprod.engine.slots.get(id)?.node.state.program;
+      return p && String.fromCharCode(...p.slice(145, 155)).trim() === want;
+    },
+    { id: dxId, want: wantName },
+    { timeout: 8000 },
+  );
+  step(`Choosing voice "${wantName}" in Ana's Dexed switches Ben's too`);
+
+  // Ana tweaks operator 1's level; Ben's program byte follows.
+  await ana.evaluate(() => {
+    const slider = [...document.querySelectorAll('#channelPanel .dx-op')][0].querySelector('input[type=range]');
+    slider.value = '42';
+    slider.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  await ben.waitForFunction((id) => window.coprod.engine.slots.get(id)?.node.state.program[5 * 21 + 16] === 42, dxId, { timeout: 8000 });
+  step('Editing an operator in Dexed syncs to Ben');
+  await ana.waitForTimeout(300);
+  await (await ana.$('#channelPanel')).screenshot({ path: `${SHOTS}8-dexed.png` });
+
   // A phone-sized third person.
   const cara = await join_('Cara', { width: 390, height: 844 });
   await cara.waitForFunction(() => document.querySelectorAll('#people .avatar').length === 3);
