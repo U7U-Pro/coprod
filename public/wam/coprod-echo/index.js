@@ -51,6 +51,7 @@ class EchoNode extends GainNode {
     this.tempo = 120;
     this.params = Object.fromEntries(Object.entries(PARAMS).map(([k, p]) => [k, p.default]));
     this.listeners = new Set();
+    this.auto = {}; // host automation overrides while the song plays
     this.out = ctx.createGain();
     this.dry = ctx.createGain();
     this.wet = ctx.createGain();
@@ -73,7 +74,7 @@ class EchoNode extends GainNode {
   }
 
   apply() {
-    const p = this.params;
+    const p = { ...this.params, ...this.auto };
     const now = this.context.currentTime;
     const beat = 60 / this.tempo;
     this.delay.delayTime.setTargetAtTime(Math.min(3.9, beat * DIVISIONS[p.time][1]), now, 0.02);
@@ -85,11 +86,28 @@ class EchoNode extends GainNode {
 
   scheduleEvents(...events) {
     for (const e of events) {
-      if (e.type === 'wam-transport' && e.data?.tempo) {
-        this.tempo = e.data.tempo;
+      if (e.type === 'wam-transport') {
+        if (e.data?.tempo) this.tempo = e.data.tempo;
+        if (e.data?.playing === false) this.auto = {};
+        this.apply();
+      } else if (e.type === 'wam-automation' && PARAMS[e.data.id]) {
+        const p = PARAMS[e.data.id];
+        let v = e.data.normalized ? p.min + e.data.value * (p.max - p.min) : e.data.value;
+        if (p.step === 1) v = Math.round(v);
+        this.auto[e.data.id] = v;
         this.apply();
       }
     }
+  }
+
+  async getParameterInfo() {
+    return Object.fromEntries(
+      Object.entries(PARAMS).map(([id, p]) => [id, { id, label: p.label, type: p.step === 1 ? 'choice' : 'float', minValue: p.min, maxValue: p.max, defaultValue: p.default }]),
+    );
+  }
+
+  async getParameterValues() {
+    return Object.fromEntries(Object.entries(this.params).map(([id, value]) => [id, { id, value, normalized: false }]));
   }
 
   clearEvents() {}

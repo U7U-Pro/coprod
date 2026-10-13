@@ -5,10 +5,11 @@
 //
 // Signal flow per channel:
 //   instrument (built-in synth | sample | WAM plugin)
-//     -> bus.gain (volume/mute/solo) -> [WAM effects...] -> bus.pan -> master
+//     -> bus.gain (volume/mute/solo) -> bus.autoGain (volume automation)
+//     -> [WAM effects...] -> bus.pan -> bus.autoPan (pan automation) -> master
 
 import { instruments } from './instruments.js';
-import { STEPS_PER_BAR, INSTRUMENTS } from './shared/schema.js';
+import { STEPS_PER_BAR, INSTRUMENTS, laneValueAt } from './shared/schema.js';
 import { PluginHost, isTrusted, sendEvents } from './plugins.js';
 
 const LOOKAHEAD_S = 0.12;
@@ -62,7 +63,9 @@ export class Engine {
     for (const [id, bus] of this.buses) {
       if (!ids.has(id)) {
         bus.gain.disconnect();
+        bus.autoGain.disconnect();
         bus.pan.disconnect();
+        bus.autoPan.disconnect();
         this.buses.delete(id);
       }
     }
@@ -84,9 +87,13 @@ export class Engine {
     let b = this.buses.get(channelId);
     if (!b) {
       const gain = this.ctx.createGain();
+      const autoGain = this.ctx.createGain();
       const pan = this.ctx.createStereoPanner();
-      gain.connect(pan).connect(this.master);
-      b = { gain, pan, chain: [], chainKey: '' };
+      const autoPan = this.ctx.createStereoPanner();
+      gain.connect(autoGain);
+      autoGain.connect(pan);
+      pan.connect(autoPan).connect(this.master);
+      b = { gain, autoGain, pan, autoPan, chain: [], chainKey: '' };
       this.buses.set(channelId, b);
     }
     return b;
@@ -246,13 +253,13 @@ export class Engine {
       .filter(({ f, slot }) => f.on && slot?.status === 'ready');
     const key = chain.map(({ f }) => f.id).join(',');
     if (key === bus.chainKey) return;
-    bus.gain.disconnect();
+    bus.autoGain.disconnect();
     for (const node of bus.chain) {
       try {
         node.disconnect();
       } catch {}
     }
-    let prev = bus.gain;
+    let prev = bus.autoGain;
     for (const { slot } of chain) {
       prev.connect(slot.node);
       prev = slot.node;
@@ -316,6 +323,7 @@ export class Engine {
     this.mode = mode;
     this.patternId = patternId;
     this.cursor = { songIndex: 0, step: 0 };
+    this.laneLast = new Map();
     this.nextTime = this.ctx.currentTime + 0.05;
     this.marks = [];
     this.playing = true;
@@ -331,6 +339,14 @@ export class Engine {
     this.marks = [];
     if (!this.ctx) return;
     const now = this.ctx.currentTime;
+    // Automation only applies while playing: back to the mixer settings.
+    for (const bus of this.buses.values()) {
+      bus.autoGain.gain.cancelScheduledValues(now);
+      bus.autoGain.gain.setTargetAtTime(1, now, 0.02);
+      bus.autoPan.pan.cancelScheduledValues(now);
+      bus.autoPan.pan.setTargetAtTime(0, now, 0.02);
+    }
+    this.laneLast = new Map();
     for (const slot of this.slots.values()) {
       if (slot.status !== 'ready' || slot.kind !== 'inst') continue;
       slot.node.clearEvents?.();
@@ -379,6 +395,35 @@ export class Engine {
     for (const n of pattern.byStep?.get(step) ?? []) {
       const c = this.project.channels.find((x) => x.id === n.ch);
       if (c) this.voice(c, time, { pitch: n.p, vel: n.v / 127, dur: n.l * stepDur });
+    }
+    this.scheduleAutomation(pattern, step, time, stepDur);
+  }
+
+  /** Play automation lanes: 4 points per step, only when the value changes. */
+  scheduleAutomation(pattern, step, time, stepDur) {
+    this.laneLast ??= new Map();
+    for (const lane of pattern.lanes ?? []) {
+      if (!lane.points.length) continue;
+      const bus = this.buses.get(lane.ch);
+      if (!bus) continue;
+      for (let k = 0; k < 4; k++) {
+        const v = laneValueAt(lane.points, step + k / 4);
+        const t = time + (k * stepDur) / 4;
+        const key = lane.id;
+        const first = !this.laneLast.has(key);
+        if (this.laneLast.get(key) === v) continue;
+        this.laneLast.set(key, v);
+        // The first value jumps into place; after that, ramp between points.
+        const set = (param, value) => (first ? param.setValueAtTime(value, t) : param.linearRampToValueAtTime(value, t));
+        if (lane.target === 'vol') set(bus.autoGain.gain, v * v);
+        else if (lane.target === 'pan') set(bus.autoPan.pan, v * 2 - 1);
+        else {
+          const [kind, a, b] = lane.target.split(':');
+          const slot = this.slots.get(kind === 'p' ? lane.ch : `${lane.ch}/${a}`);
+          if (slot?.status !== 'ready') continue;
+          sendEvents(slot.node, { type: 'wam-automation', time: t, data: { id: kind === 'p' ? a : b, value: v, normalized: true } });
+        }
+      }
     }
   }
 

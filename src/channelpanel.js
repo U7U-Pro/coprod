@@ -40,8 +40,10 @@ export class ChannelPanel {
     for (const type of ['input', 'change', 'pointerup', 'keyup', 'wheel']) root.addEventListener(type, touched, true);
     this.pending = new Map();
     // Some GUIs change state without DOM events (canvas knobs, pointer capture).
+    // Not while playing: then automation is moving knobs, and those values
+    // are temporary, not edits to share.
     setInterval(() => {
-      if (!this.channelId) return;
+      if (!this.channelId || this.engine.playing) return;
       for (const key of this.guis.keys()) this.capture(key);
     }, 1000);
   }

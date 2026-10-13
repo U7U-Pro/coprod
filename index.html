@@ -69,6 +69,19 @@
         <div class="cp-body"></div>
       </section>
 
+      <section id="autoPanel" class="roll-panel auto-panel" hidden>
+        <header>
+          <span class="swatch"></span>
+          <h2 class="ap-title">Automation</h2>
+          <div class="ap-lanes tabs"></div>
+          <select class="ap-add" aria-label="Add an automation lane"><option value="">+ Add lane…</option></select>
+          <button class="ghost danger ap-del" hidden>Delete lane</button>
+          <span class="hint">Click to add a point · drag to move (Shift: no snapping) · double-click to delete</span>
+          <button class="ghost ap-close" aria-label="Close automation">✕</button>
+        </header>
+        <div class="ap-body"><canvas class="ap-canvas"></canvas></div>
+      </section>
+
       <section id="rollPanel" class="roll-panel" hidden>
         <header>
           <span class="swatch" id="rollSwatch"></span>

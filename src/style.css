@@ -1022,6 +1022,27 @@ body.dropping .drop-hint {
   align-self: flex-start;
 }
 
+/* ---------------------------------------------------------------- automation */
+
+.auto-panel .ap-body {
+  overflow-x: auto;
+}
+
+.auto-panel .ap-canvas {
+  display: block;
+  touch-action: none;
+  cursor: crosshair;
+}
+
+.auto-panel .ap-lanes {
+  flex-wrap: wrap;
+}
+
+.autobtn.on {
+  color: var(--text);
+  border-color: #ffb23f;
+}
+
 @media (max-width: 640px) {
   /* Stack each row: controls on top, a full-width step lane below. */
   .row {

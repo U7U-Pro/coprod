@@ -7,10 +7,18 @@
 //                                  sample?, plugin?, pluginState?, fx: Y.Map }
 //               sample:  { id: sha256 of the uploaded file, name }
 //               plugin:  { url, name } of a Web Audio Module instrument
-//               fx:      fxId -> { url, name, order, on, state }  (insert effects)
+//               pstate:  Y.Map, the plugin's state, one entry per top-level key
+//               fx:      fxId -> { url, name, order, on }  (insert effects)
+//               fxstate: Y.Map, "fxId/key" -> each effect's state, per key
+//
+// Plugin state is stored per top-level key so that turning one knob only
+// sends that part (e.g. a synth's `params`), not its whole state, which can
+// include large things like custom wavetables.
 //   patterns  Y.Array  of Y.Map { id, name, bars, steps: Y.Map, notes: Y.Map }
 //               steps: "channelId:stepIndex" -> velocity (missing = off)
 //               notes: noteId -> { ch, p, s, l, v }  (pitch, start step, length, velocity)
+//               auto:    laneId -> { ch, target, label }   automation lanes
+//               autoPts: "laneId/pointId" -> { s, v }     their points (step, 0..1)
 //   song      Y.Array  of pattern ids, played in order in Song mode
 //
 // Steps are keyed map entries rather than array slots so that two people
@@ -46,7 +54,7 @@ export const INSTRUMENTS = {
 /** Instruments that need nothing but the browser. */
 export const BUILT_IN = Object.keys(INSTRUMENTS).filter((k) => !INSTRUMENTS[k].needs);
 
-export const MAX_PLUGIN_STATE = 100_000; // bytes of JSON per plugin
+export const MAX_PLUGIN_STATE = 256_000; // bytes of JSON per top-level state key
 
 /** Plugin URLs must be same-origin paths or http(s) URLs. */
 export function cleanPluginUrl(url) {
@@ -61,12 +69,36 @@ export function cleanPluginUrl(url) {
   }
 }
 
-/** JSON-safe copy of a plugin state, or undefined if it's too big to share. */
+/** JSON-safe copy of a value, or undefined if it's too big to share. */
 function cleanState(state) {
-  if (state === undefined || state === null) return undefined;
+  if (state === undefined) return undefined;
   const json = JSON.stringify(state);
   if (json === undefined || json.length > MAX_PLUGIN_STATE) return undefined;
   return JSON.parse(json);
+}
+
+const isPlainObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
+
+/**
+ * Write `state` into Y.Map `map`, key by key, touching only keys whose value
+ * changed. `prefix` namespaces keys when several states share one map.
+ */
+function writeState(map, state, prefix = '') {
+  for (const [k, v] of Object.entries(state)) {
+    const clean = cleanState(v);
+    if (clean === undefined) continue; // too big: keep the old value
+    const key = prefix + k;
+    if (JSON.stringify(map.get(key)) !== JSON.stringify(clean)) map.set(key, clean);
+  }
+  for (const key of [...map.keys()]) {
+    if (key.startsWith(prefix) && !Object.hasOwn(state, key.slice(prefix.length))) map.delete(key);
+  }
+}
+
+/** Get (creating if needed) a nested Y.Map field on a Y.Map. */
+function childMap(parent, field) {
+  if (!(parent.get(field) instanceof Y.Map)) parent.set(field, new Y.Map());
+  return parent.get(field);
 }
 
 export const COLORS = ['#ff8a3d', '#ffd23f', '#5ce1a3', '#3ad5ff', '#8f7bff', '#ff5fa2', '#ff6b6b', '#b8f35d'];
@@ -149,8 +181,16 @@ export function addPluginChannel(doc, plugin) {
 
 export function setPluginState(doc, channelId, state) {
   const c = findChannel(doc, channelId);
-  const clean = cleanState(state);
-  if (c && clean !== undefined) c.set('pluginState', clean);
+  if (!c) return;
+  doc.transact(() => {
+    if (isPlainObject(state)) {
+      writeState(childMap(c, 'pstate'), state);
+      if (c.has('pluginState')) c.delete('pluginState');
+    } else {
+      const clean = cleanState(state);
+      if (clean !== undefined) c.set('pluginState', clean);
+    }
+  });
 }
 
 // ------------------------------------------------------------------ effects
@@ -168,21 +208,30 @@ export function addEffect(doc, channelId, plugin) {
 }
 
 export function setEffect(doc, channelId, fxId, patch) {
-  const fx = findChannel(doc, channelId)?.get('fx');
+  const c = findChannel(doc, channelId);
+  const fx = c?.get('fx');
   const cur = fx?.get(fxId);
   if (!cur) return;
-  const next = { ...cur };
-  if ('on' in patch) next.on = !!patch.on;
-  if ('state' in patch) {
-    const clean = cleanState(patch.state);
-    if (clean === undefined) return;
-    next.state = clean;
-  }
-  fx.set(fxId, next);
+  doc.transact(() => {
+    if ('on' in patch && !!patch.on !== cur.on) fx.set(fxId, { ...cur, on: !!patch.on });
+    if ('state' in patch) {
+      if (isPlainObject(patch.state)) writeState(childMap(c, 'fxstate'), patch.state, `${fxId}/`);
+      else {
+        const clean = cleanState(patch.state);
+        if (clean !== undefined) fx.set(fxId, { ...fx.get(fxId), state: clean });
+      }
+    }
+  });
 }
 
 export function removeEffect(doc, channelId, fxId) {
-  findChannel(doc, channelId)?.get('fx')?.delete(fxId);
+  const c = findChannel(doc, channelId);
+  if (!c) return;
+  doc.transact(() => {
+    c.get('fx')?.delete(fxId);
+    const fs = c.get('fxstate');
+    if (fs) for (const key of [...fs.keys()]) if (key.startsWith(`${fxId}/`)) fs.delete(key);
+  });
 }
 
 export function setChannel(doc, id, patch) {
@@ -212,6 +261,8 @@ export function removeChannel(doc, id) {
       for (const key of [...steps.keys()]) if (key.startsWith(`${id}:`)) steps.delete(key);
       const notes = p.get('notes');
       for (const [nid, n] of [...notes.entries()]) if (n.ch === id) notes.delete(nid);
+      const auto = p.get('auto');
+      if (auto) for (const [lid, lane] of [...auto.entries()]) if (lane.ch === id) removeLaneIn(p, lid);
     }
   });
 }
@@ -298,6 +349,12 @@ export function clonePattern(doc, id) {
     patterns(doc).insert(findIndex(patterns(doc), id) + 1, [p]);
     for (const [k, v] of src.get('steps').entries()) p.get('steps').set(k, v);
     for (const n of src.get('notes').values()) p.get('notes').set(newId(), { ...n });
+    if (src.get('auto')?.size) {
+      const lanes = childMap(p, 'auto');
+      const pts = childMap(p, 'autoPts');
+      for (const [k, v] of src.get('auto').entries()) lanes.set(k, { ...v });
+      for (const [k, v] of src.get('autoPts').entries()) pts.set(k, { ...v });
+    }
   });
   return p.get('id');
 }
@@ -327,8 +384,90 @@ export function setPattern(doc, id, patch) {
         if (n.s >= max) p.get('notes').delete(nid);
         else if (n.s + n.l > max) p.get('notes').set(nid, { ...n, l: max - n.s });
       }
+      const pts = p.get('autoPts');
+      if (pts) for (const [k, pt] of [...pts.entries()]) if (pt.s > max) pts.set(k, { ...pt, s: max });
     }
   });
+}
+
+// ------------------------------------------------------------------ automation
+
+/**
+ * Automation targets: 'vol' and 'pan' (the channel's mixer), 'p:<paramId>'
+ * (a parameter of the channel's plugin instrument), or 'fx:<fxId>:<paramId>'
+ * (a parameter of one of its plugin effects). Values are normalized 0..1.
+ */
+const TARGET = /^(vol|pan|p:[\w.-]{1,64}|fx:\w{1,16}:[\w.-]{1,64})$/;
+
+export function addLane(doc, patternId, channelId, target, label) {
+  const p = findPattern(doc, patternId);
+  if (!p || !TARGET.test(target)) return null;
+  let id = null;
+  doc.transact(() => {
+    const lanes = childMap(p, 'auto');
+    childMap(p, 'autoPts');
+    for (const [k, l] of lanes.entries()) if (l.ch === channelId && l.target === target) id = k;
+    if (id) return;
+    id = newId();
+    lanes.set(id, { ch: String(channelId), target, label: String(label ?? target).slice(0, 48) });
+  });
+  return id;
+}
+
+function removeLaneIn(p, laneId) {
+  p.get('auto')?.delete(laneId);
+  const pts = p.get('autoPts');
+  if (pts) for (const k of [...pts.keys()]) if (k.startsWith(`${laneId}/`)) pts.delete(k);
+}
+
+export function removeLane(doc, patternId, laneId) {
+  const p = findPattern(doc, patternId);
+  if (p) doc.transact(() => removeLaneIn(p, laneId));
+}
+
+/** Add (pointId omitted) or move a point. `s` is in steps, `v` 0..1. */
+export function setPoint(doc, patternId, laneId, pointId, { s, v }) {
+  const p = findPattern(doc, patternId);
+  if (!p?.get('auto')?.has(laneId)) return null;
+  const max = p.get('bars') * STEPS_PER_BAR;
+  const id = pointId ?? newId();
+  childMap(p, 'autoPts').set(`${laneId}/${id}`, {
+    s: Math.round(Math.max(0, Math.min(max, +s || 0)) * 1000) / 1000,
+    v: Math.round(Math.max(0, Math.min(1, +v || 0)) * 1000) / 1000,
+  });
+  return id;
+}
+
+export function removePoint(doc, patternId, laneId, pointId) {
+  findPattern(doc, patternId)?.get('autoPts')?.delete(`${laneId}/${pointId}`);
+}
+
+/** Value of a lane at position `pos` (steps): linear between points, held at the ends. */
+export function laneValueAt(points, pos) {
+  if (!points.length) return null;
+  if (pos <= points[0].s) return points[0].v;
+  for (let i = 1; i < points.length; i++) {
+    const a = points[i - 1];
+    const b = points[i];
+    if (pos <= b.s) return b.s > a.s ? a.v + ((b.v - a.v) * (pos - a.s)) / (b.s - a.s) : b.v;
+  }
+  return points.at(-1).v;
+}
+
+function readLanes(p) {
+  const lanes = p.get('auto');
+  if (!lanes?.size) return [];
+  const byLane = new Map();
+  for (const [k, pt] of p.get('autoPts')?.entries() ?? []) {
+    const [lid, pid] = k.split('/');
+    if (!byLane.has(lid)) byLane.set(lid, []);
+    byLane.get(lid).push({ id: pid, s: pt.s, v: pt.v });
+  }
+  return [...lanes.entries()].map(([id, l]) => ({
+    id,
+    ...l,
+    points: (byLane.get(id) ?? []).sort((a, b) => a.s - b.s || (a.id < b.id ? -1 : 1)),
+  }));
 }
 
 // ------------------------------------------------------------------ song + meta
@@ -398,10 +537,16 @@ export function readProject(doc) {
       .toArray()
       .map((c) => {
         const json = c.toJSON();
+        const fxState = {};
+        for (const [k, v] of Object.entries(json.fxstate ?? {})) {
+          const cut = k.indexOf('/');
+          (fxState[k.slice(0, cut)] ??= {})[k.slice(cut + 1)] = v;
+        }
         const fx = Object.entries(json.fx ?? {})
-          .map(([id, f]) => ({ id, ...f }))
+          .map(([id, f]) => ({ id, ...f, state: fxState[id] ?? f.state }))
           .sort((a, b) => a.order - b.order || (a.id < b.id ? -1 : 1));
-        return { ...json, fx };
+        const { pstate, fxstate, ...rest } = json;
+        return { ...rest, pluginState: pstate ?? json.pluginState, fx };
       }),
     patterns: patterns(doc)
       .toArray()
@@ -411,6 +556,7 @@ export function readProject(doc) {
         bars: p.get('bars'),
         steps: new Map(p.get('steps').entries()),
         notes: [...p.get('notes').entries()].map(([id, n]) => ({ id, ...n })),
+        lanes: readLanes(p),
       })),
     song: song(doc).toArray(),
   };

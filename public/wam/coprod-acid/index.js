@@ -50,6 +50,7 @@ class AcidNode extends GainNode {
     this.params = Object.fromEntries(Object.entries(PARAMS).map(([k, p]) => [k, p.default]));
     this.voices = new Map(); // note -> [voice]
     this.listeners = new Set();
+    this.auto = {}; // host automation overrides while the song plays
   }
 
   get groupId() {
@@ -64,6 +65,12 @@ class AcidNode extends GainNode {
 
   scheduleEvents(...events) {
     for (const e of events) {
+      if (e.type === 'wam-automation') {
+        const p = PARAMS[e.data.id];
+        if (p) this.auto[e.data.id] = e.data.normalized ? p.min + e.data.value * (p.max - p.min) : e.data.value;
+        continue;
+      }
+      if (e.type === 'wam-transport' && e.data?.playing === false) this.auto = {};
       if (e.type !== 'wam-midi') continue;
       const [status, note, vel] = e.data.bytes;
       const time = Math.max(e.time ?? 0, this.context.currentTime);
@@ -76,7 +83,7 @@ class AcidNode extends GainNode {
 
   noteOn(note, vel, t) {
     const ctx = this.context;
-    const p = this.params;
+    const p = { ...this.params, ...this.auto };
     const osc = ctx.createOscillator();
     osc.type = p.wave >= 0.5 ? 'square' : 'sawtooth';
     osc.frequency.value = hz(note);

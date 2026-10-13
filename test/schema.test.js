@@ -175,8 +175,8 @@ test('plugin channels and effects', () => {
 
   S.setPluginState(doc, id, { cutoff: 0.4 });
   assert.deepEqual(c().pluginState, { cutoff: 0.4 });
-  S.setPluginState(doc, id, { blob: 'x'.repeat(S.MAX_PLUGIN_STATE) });
-  assert.deepEqual(c().pluginState, { cutoff: 0.4 }, 'oversized states are not shared');
+  S.setPluginState(doc, id, { cutoff: 0.5, blob: 'x'.repeat(S.MAX_PLUGIN_STATE) });
+  assert.deepEqual(c().pluginState, { cutoff: 0.5 }, 'an oversized key is dropped, the rest is shared');
 
   const a = S.addEffect(doc, id, { url: '/wam/coprod-echo/index.js', name: 'Echo' });
   const b = S.addEffect(doc, id, { url: 'https://example.com/fx/index.js', name: 'Fuzz' });
@@ -197,4 +197,67 @@ test('two people adding effects at once keeps both', () => {
   sync(a, b);
   same(a, b);
   assert.equal(S.readProject(a).channels[0].fx.length, 2);
+});
+
+test('plugin state syncs per key: a knob turn does not resend a big wavetable', () => {
+  const [a, b] = peers();
+  const id = S.addPluginChannel(a, { url: '/wam/vertex/index.js', name: 'Vertex' });
+  const table = 'x'.repeat(90_000);
+  S.setPluginState(a, id, { params: { cutoff: 0.5 }, tables: { a: table } });
+  sync(a, b);
+  const before = Y.encodeStateVector(b);
+  S.setPluginState(a, id, { params: { cutoff: 0.6 }, tables: { a: table } });
+  const update = Y.encodeStateAsUpdate(a, before);
+  assert.ok(update.length < 500, `knob change sent ${update.length} bytes`);
+  Y.applyUpdate(b, update, 'remote');
+  const st = S.readProject(b).channels.find((c) => c.id === id).pluginState;
+  assert.equal(st.params.cutoff, 0.6);
+  assert.equal(st.tables.a.length, 90_000);
+});
+
+test('effect state is per key too, and removing an effect clears it', () => {
+  const doc = new Y.Doc();
+  S.seedProject(doc);
+  const ch = S.readProject(doc).channels[0].id;
+  const fx = S.addEffect(doc, ch, { url: '/wam/coprod-echo/index.js', name: 'Echo' });
+  S.setEffect(doc, ch, fx, { state: { time: 2, mix: 0.4 } });
+  assert.deepEqual(S.readProject(doc).channels[0].fx[0].state, { time: 2, mix: 0.4 });
+  S.setEffect(doc, ch, fx, { state: { time: 3, mix: 0.4 } });
+  assert.deepEqual(S.readProject(doc).channels[0].fx[0].state, { time: 3, mix: 0.4 });
+  S.removeEffect(doc, ch, fx);
+  assert.equal(doc.getArray('channels').get(0).get('fxstate').size, 0);
+});
+
+test('automation lanes: points, interpolation, merge, cleanup', () => {
+  const [a, b] = peers();
+  const p = S.readProject(a);
+  const pid = p.patterns[0].id;
+  const ch = p.channels[0].id;
+  const lane = S.addLane(a, pid, ch, 'vol', 'Kick: Volume');
+  assert.equal(S.addLane(a, pid, ch, 'vol'), lane, 'one lane per target');
+  assert.equal(S.addLane(a, pid, ch, 'bad target!'), null);
+  S.setPoint(a, pid, lane, null, { s: 0, v: 0 });
+  const mid = S.setPoint(a, pid, lane, null, { s: 8, v: 1 });
+  sync(a, b);
+  // Both people add points at once; both survive.
+  S.setPoint(a, pid, lane, null, { s: 4, v: 0.25 });
+  S.setPoint(b, pid, lane, null, { s: 12, v: 0.5 });
+  sync(a, b);
+  same(a, b);
+  const pts = S.readProject(a).patterns[0].lanes[0].points;
+  assert.deepEqual(pts.map((x) => x.s), [0, 4, 8, 12]);
+  assert.equal(S.laneValueAt(pts, 2), 0.125);
+  assert.equal(S.laneValueAt(pts, 6), 0.625);
+  assert.equal(S.laneValueAt(pts, 15), 0.5, 'held after the last point');
+  assert.equal(S.laneValueAt([], 3), null);
+
+  S.setPoint(a, pid, lane, mid, { s: 9, v: 2 });
+  assert.equal(S.readProject(a).patterns[0].lanes[0].points.find((x) => x.id === mid).v, 1, 'clamped');
+
+  const copy = S.clonePattern(a, pid);
+  assert.equal(S.readProject(a).patterns.find((x) => x.id === copy).lanes[0].points.length, 4, 'clones keep automation');
+
+  S.removeChannel(a, ch);
+  assert.equal(S.readProject(a).patterns[0].lanes.length, 0, 'deleting the channel deletes its lanes');
+  assert.equal(a.getArray('patterns').get(0).get('autoPts').size, 0);
 });

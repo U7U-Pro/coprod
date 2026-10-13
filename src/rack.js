@@ -62,6 +62,7 @@ export class Rack {
     r.inst = el('select', { class: 'inst', 'aria-label': 'Instrument' });
     r.inst.addEventListener('change', () => this.actions.setChannel(c.id, { inst: r.inst.value }));
     r.fx = el('button', { class: 'mini fxbtn', title: 'Sound, plugin and effects', onclick: () => this.actions.openChannel(c.id) }, 'FX');
+    r.auto = el('button', { class: 'mini fxbtn autobtn', title: 'Automation in this pattern', onclick: () => this.actions.openAuto(c.id) }, 'A');
     r.status = el('span', { class: 'chip' });
     r.vol = el('input', { type: 'range', min: '0', max: '1', step: '0.01', class: 'vol', title: 'Volume', 'aria-label': 'Volume' });
     r.vol.addEventListener('input', () => this.actions.setChannel(c.id, { vol: +r.vol.value }));
@@ -76,7 +77,7 @@ export class Rack {
     r.row = el(
       'div',
       { class: 'row', dataset: { id: c.id } },
-      el('div', { class: 'ctrl' }, el('span', { class: 'color' }), r.mute, r.solo, el('div', { class: 'namebox' }, r.name, r.inst), r.vol, r.pan, r.fx),
+      el('div', { class: 'ctrl' }, el('span', { class: 'color' }), r.mute, r.solo, el('div', { class: 'namebox' }, r.name, r.inst), r.vol, r.pan, r.fx, r.auto),
       el('div', { class: 'lane' }, r.steps, r.mini, r.badge, r.status),
       r.del,
     );
@@ -131,6 +132,9 @@ export class Rack {
     set(r.inst, c.inst);
     r.fx.textContent = c.fx?.length ? `FX ${c.fx.length}` : 'FX';
     r.fx.classList.toggle('on', !!c.fx?.length);
+    const lanes = (pattern.lanes ?? []).filter((l) => l.ch === c.id && l.points.length).length;
+    r.auto.textContent = lanes ? `A ${lanes}` : 'A';
+    r.auto.classList.toggle('on', lanes > 0);
     const st = status(c);
     r.status.hidden = !st;
     if (st) {

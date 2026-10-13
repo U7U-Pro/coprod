@@ -305,6 +305,106 @@ try {
   await ana.waitForTimeout(300);
   await (await ana.$('#channelPanel')).screenshot({ path: `${SHOTS}8-dexed.png` });
 
+  // ---- Vertex (wavetable synth) ----------------------------------------
+  await ana.click('#channelPanel .cp-close').catch(() => {});
+  await ana.selectOption('#addChannel', '__plugin');
+  await ana.click('.picker-item:has-text("Vertex")');
+  await ana.waitForSelector('#channelPanel .vx', { timeout: 15000 });
+  const vxId = await ana.evaluate(() => window.coprod.ui.project.channels.find((c) => c.plugin?.name === 'Vertex').id);
+  await ben.waitForFunction((id) => window.coprod.engine.slotStatus(id).status === 'ready', vxId, { timeout: 15000 });
+  step('Ana adds Vertex; it loads for Ben too');
+
+  await ana.selectOption('#channelPanel .vx-preset select', { label: 'Supersaw Lead' });
+  await ben.waitForFunction((id) => window.coprod.engine.slots.get(id)?.node.name === 'Supersaw Lead', vxId, { timeout: 8000 });
+  step('Picking a Vertex preset switches Ben’s Vertex');
+
+  // Turn the cutoff knob by dragging it, like a person would.
+  const cutoff = await ana.$('#channelPanel .vx-knob[data-param="flt_cutoff"]');
+  await cutoff.scrollIntoViewIfNeeded();
+  const kb = await cutoff.boundingBox();
+  const cutoffBefore = await ben.evaluate((id) => window.coprod.engine.slots.get(id).node.get('flt_cutoff'), vxId);
+  await ana.mouse.move(kb.x + kb.width / 2, kb.y + 20);
+  await ana.mouse.down();
+  await ana.mouse.move(kb.x + kb.width / 2, kb.y - 40, { steps: 6 });
+  await ana.mouse.up();
+  await ben.waitForFunction(
+    ({ id, before }) => window.coprod.engine.slots.get(id).node.get('flt_cutoff') < before - 0.1 || window.coprod.engine.slots.get(id).node.get('flt_cutoff') > before + 0.1,
+    { id: vxId, before: cutoffBefore },
+    { timeout: 8000 },
+  );
+  step('Dragging Vertex’s cutoff knob moves Ben’s too');
+
+  // Drag LFO 2 onto the oscillator's wavetable position knob.
+  // (A tall window so the chip and the knob are both on screen, as on a desktop.)
+  await ana.setViewportSize({ width: 1280, height: 2000 });
+  await (await ana.$('#channelPanel .vx')).scrollIntoViewIfNeeded();
+  await ana.dragAndDrop('#channelPanel .vx-chip:has-text("LFO 2")', '#channelPanel .vx-knob[data-param="a_pos"]');
+  await ana.setViewportSize({ width: 1280, height: 860 });
+  await ben.waitForFunction((id) => window.coprod.engine.slots.get(id).node.routes.some((r) => r.src === 'lfo2' && r.dst === 'a_pos'), vxId, { timeout: 8000 });
+  step('Drag-and-drop LFO 2 → WT position creates a modulation route for everyone');
+
+  // Touch-friendly way: tap a source, then tap a knob.
+  await ana.click('#channelPanel .vx-chip:has-text("Env 2")');
+  await ana.click('#channelPanel .vx-knob[data-param="flt_res"]');
+  await ben.waitForFunction((id) => window.coprod.engine.slots.get(id).node.routes.some((r) => r.src === 'env2' && r.dst === 'flt_res'), vxId, { timeout: 8000 });
+  step('Tap Env 2, then tap Resonance: also creates a route (works on phones)');
+
+  // A custom wavetable from a formula.
+  await ana.click('#channelPanel .vx-wt >> nth=0');
+  await ana.fill('.vx-modal input[type=text]', 'sin(2*pi*x) + y*0.5*sq(x*3)');
+  await ana.click('.vx-modal button:has-text("Apply to all frames")');
+  await ana.click('.vx-modal button:has-text("Use this wavetable")');
+  await ben.waitForFunction((id) => window.coprod.engine.slots.get(id).node.tables.a.kind === 'custom', vxId, { timeout: 8000 });
+  step('A custom wavetable made in Ana’s editor reaches Ben');
+  await ana.waitForTimeout(500);
+  await (await ana.$('#channelPanel')).screenshot({ path: `${SHOTS}9-vertex.png` });
+
+  // ---- Automation ---------------------------------------------------------
+  await ana.click(`.row[data-id="${vxId}"] .autobtn`);
+  await ana.waitForSelector('#autoPanel:not([hidden])');
+  await ana.waitForFunction(() => [...document.querySelectorAll('#autoPanel .ap-add option')].some((o) => o.value.startsWith('p:flt_cutoff|')), null, { timeout: 8000 });
+  const cutoffOpt = await ana.evaluate(() => [...document.querySelectorAll('#autoPanel .ap-add option')].find((o) => o.value.startsWith('p:flt_cutoff|')).value);
+  await ana.selectOption('#autoPanel .ap-add', cutoffOpt);
+  await (await ana.$('#autoPanel .ap-canvas')).scrollIntoViewIfNeeded();
+  const cv = await (await ana.$('#autoPanel .ap-canvas')).boundingBox();
+  await ana.mouse.click(cv.x + 4, cv.y + cv.height - 12); // low at the start
+  await ana.mouse.click(cv.x + cv.width * 0.5, cv.y + 12); // high in the middle
+  await ana.mouse.click(cv.x + cv.width - 6, cv.y + cv.height * 0.6);
+  await ben.waitForFunction((id) => window.coprod.ui.project.patterns[0].lanes.some((l) => l.ch === id && l.target === 'p:flt_cutoff' && l.points.length === 3), vxId, { timeout: 8000 });
+  step('Ana draws a 3-point cutoff automation lane; Ben has it');
+
+  // A volume lane on the kick.
+  const kickId = await ana.evaluate(() => window.coprod.ui.project.channels[0].id);
+  await ana.evaluate((id) => {
+    const { doc, S, ui } = window.coprod;
+    const pid = ui.project.patterns[0].id;
+    const lane = S.addLane(doc, pid, id, 'vol', 'Volume');
+    S.setPoint(doc, pid, lane, null, { s: 0, v: 0.1 });
+    S.setPoint(doc, pid, lane, null, { s: 16, v: 1 });
+  }, kickId);
+  await (await ana.$('#autoPanel')).screenshot({ path: `${SHOTS}10-automation.png` });
+
+  // Ben plays: the automation drives his Vertex and his kick volume.
+  if (await ben.evaluate(() => window.coprod.engine.playing)) await ben.click('#play');
+  await ben.click('#play');
+  await ben.waitForFunction((id) => window.coprod.engine.slots.get(id).node.autoValues.has('flt_cutoff'), vxId, { timeout: 5000 });
+  const gains = await ben.evaluate(async (id) => {
+    const g = window.coprod.engine.buses.get(id).autoGain.gain;
+    const seen = [];
+    for (let i = 0; i < 12; i++) {
+      seen.push(g.value);
+      await new Promise((r) => setTimeout(r, 120));
+    }
+    return seen;
+  }, kickId);
+  if (!(Math.min(...gains) < 0.5)) throw new Error(`kick volume automation not applied: ${gains.map((g) => g.toFixed(2))}`);
+  step(`Playing applies automation: Vertex cutoff follows the lane, kick volume ramps (${Math.min(...gains).toFixed(2)}→${Math.max(...gains).toFixed(2)})`);
+  await ben.click('#play');
+  await ben.waitForFunction((id) => window.coprod.engine.slots.get(id).node.autoValues.size === 0, vxId, { timeout: 5000 });
+  const restored = await ben.evaluate((id) => new Promise((r) => setTimeout(() => r(window.coprod.engine.buses.get(id).autoGain.gain.value), 300)), kickId);
+  if (restored < 0.95) throw new Error(`volume not restored after stop (${restored})`);
+  step('Stopping hands the knobs back (automation overrides cleared)');
+
   // A phone-sized third person.
   const cara = await join_('Cara', { width: 390, height: 844 });
   await cara.waitForFunction(() => document.querySelectorAll('#people .avatar').length === 3);

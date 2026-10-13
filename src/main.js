@@ -6,6 +6,7 @@ import { Engine } from './audio.js';
 import { Rack } from './rack.js';
 import { PianoRoll } from './pianoroll.js';
 import { ChannelPanel } from './channelpanel.js';
+import { AutomationPanel } from './automation.js';
 import { CATALOG, trustOrigin, nameFromUrl, pluginOrigin } from './plugins.js';
 
 const $ = (id) => document.getElementById(id);
@@ -114,6 +115,7 @@ const rack = new Rack($('rack'), {
   },
   openRoll: (id) => openRoll(id),
   openChannel: (id) => openChannel(id),
+  openAuto: (id) => openAuto(id),
   focusChannel,
 });
 
@@ -151,6 +153,23 @@ const channelPanel = new ChannelPanel($('channelPanel'), engine, {
   addEffectFromUrl: (ch) => pickPlugin('effect', (plugin) => S.addEffect(doc, ch, plugin)),
   onClose: () => render(),
 });
+
+const autoPanel = new AutomationPanel($('autoPanel'), engine, {
+  addLane: (ch, target, label) => S.addLane(doc, currentPattern().id, ch, target, label),
+  removeLane: (lane) => S.removeLane(doc, currentPattern().id, lane),
+  setPoint: (lane, point, pos) => S.setPoint(doc, currentPattern().id, lane, point, pos),
+  removePoint: (lane, point) => S.removePoint(doc, currentPattern().id, lane, point),
+  beginGesture: () => undo.stopCapturing(),
+  onClose: () => render(),
+});
+
+function openAuto(id) {
+  focusChannel(id);
+  engine.ensure(); // plugin parameter lists need the plugin loaded
+  autoPanel.open(id);
+  render();
+  $('autoPanel').scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+}
 
 function openChannel(id) {
   focusChannel(id);
@@ -348,6 +367,7 @@ function renderNow() {
   // Rack + roll
   rack.render(p, pattern, { solo: engine.solo, selectedChannel: ui.rollChannel ?? channelPanel.channelId, remote, status: channelStatus });
   channelPanel.render(p);
+  autoPanel.render(p, pattern);
   const rollCh = channelById(ui.rollChannel);
   if (ui.rollChannel && (!rollCh || !S.isSynth(rollCh.inst))) closeRoll();
   else if (rollCh) {
@@ -393,6 +413,8 @@ function loop() {
   const step = pos && pos.patternId === ui.patternId ? pos.step : -1;
   rack.setNow(step);
   roll.setPlayStep(step);
+  autoPanel.setPlayStep(step);
+  autoPanel.draw();
   for (const c of document.querySelectorAll('.song-chip')) c.classList.toggle('now', !!pos && ui.mode === 'song' && +c.dataset.index === pos.songIndex);
   roll.draw();
   requestAnimationFrame(loop);
@@ -511,6 +533,7 @@ window.addEventListener('keydown', (e) => {
     if (!$('picker').hidden) $('picker').hidden = true;
     else if (ui.rollChannel) closeRoll();
     else if (channelPanel.channelId) channelPanel.close();
+    else if (autoPanel.channelId) autoPanel.close();
   }
 });
 
@@ -578,4 +601,4 @@ welcome();
 requestAnimationFrame(loop);
 
 // Handy for debugging and for the end-to-end test.
-window.coprod = { doc, provider, engine, ui, S, channelPanel };
+window.coprod = { doc, provider, engine, ui, S, channelPanel, autoPanel };
