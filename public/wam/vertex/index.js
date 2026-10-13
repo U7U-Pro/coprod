@@ -166,6 +166,11 @@ export class VertexNode extends AudioWorkletNode {
     this.emit('fx');
   }
 
+  setName(name) {
+    this.name = String(name).slice(0, 40);
+    this.emit('all');
+  }
+
   loadPreset(preset) {
     return this.setState(presetState(preset));
   }

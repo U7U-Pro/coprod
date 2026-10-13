@@ -47,6 +47,8 @@ npm start          # serves dist/ and the sync socket on $PORT (default 3000)
     8-slot reorderable effects rack (distortion, chorus, flanger, phaser, delay,
     reverb, compressor/OTT-style multiband, EQ), 13 presets, and a wavetable editor
     (draw frames, safe math formulas, import audio, crossfade/spectral morphing).
+    **Save** your own presets (kept in your browser, usable in every project), and
+    **Export**/**Import** them as files to share.
   - **Dexed**, the open-source DX7 emulator compiled to WebAssembly, with its
     1,000+ voices.
   - Small **Acid** synth and **Echo** delay examples.
@@ -62,6 +64,11 @@ npm start          # serves dist/ and the sync socket on $PORT (default 3000)
 - **Undo/redo is per person**: Ctrl+Z undoes *your* last edit, never someone else's.
 - **Offline-tolerant**: if your connection drops you can keep editing; changes
   merge when you reconnect.
+- **WAV export** (top bar): the song or the current pattern (looped 1-8 times),
+  with an optional tail for reverb, as 16-bit, 24-bit or 32-bit float. It renders
+  offline (faster than real time) with fresh copies of every plugin, so it sounds
+  like playback. Mutes and your solos apply; files start exactly on the beat, so a
+  tail-less pattern export loops cleanly.
 - Space plays and stops; Esc closes the piano roll.
 
 ## How it works
@@ -92,6 +99,7 @@ browser ── edits (Yjs updates) ──► server/rooms.js ──► every oth
   in Node tests; `wavetables.js` builds band-limited mipmaps so high notes don't
   alias; `gui.js` is the interface.
 - `src/automation.js`: the automation lane editor; lanes are scheduled in `audio.js`.
+- `src/export.js`, `src/wav.js`: offline rendering and WAV encoding.
 - `plugins/dexed/`: the Dexed port: Dexed's engine source (GPLv3), the small shims
   that replace JUCE, a C interface (`dexed_wasm.cpp`), and `build.sh` to rebuild
   `public/wam/dexed/dexed.wasm` with clang's WebAssembly target. **Dexed is GPLv3**:
@@ -153,11 +161,13 @@ worklets some plugins use on secure pages (localhost is fine for development).
 
 ## Ideas / next steps
 
-1. **Export to WAV** (render with an `OfflineAudioContext`).
+1. **Pitch bend and slides**: a pitch-bend automation lane, and FL-style slide
+   notes in the piano roll.
 2. **A plugin browser** fed by the WAM community registry, plus more bundled
    plugins (a drum machine, a sampler with slicing).
-3. **Vertex**: user preset saving, more warp modes, a WebAssembly/SIMD engine for
-   more voices, and live modulation display on the knobs.
+3. **Vertex**: more warp modes, a WebAssembly/SIMD engine for more voices, and
+   live modulation display on the knobs. **Export**: stems (one WAV per channel)
+   and MP3.
 4. **Play together**: a shared transport so one person can say "listen to this".
 5. **Web MIDI input**, so you can record from a real keyboard.
 6. **Native VST3/CLAP via a desktop companion** that joins the same rooms. For a

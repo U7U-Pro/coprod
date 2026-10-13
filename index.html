@@ -30,6 +30,7 @@
         <button id="redo" title="Redo (Ctrl+Shift+Z)" aria-label="Redo">↷</button>
       </div>
       <div id="people" class="people" aria-label="People here"></div>
+      <button id="exportBtn" class="ghost" title="Render to a WAV file">Export</button>
       <button id="share" class="share">Invite</button>
     </header>
 
@@ -110,6 +111,43 @@
         <button class="primary">Start jamming</button>
       </form>
     </div>
+    <div id="exportModal" class="modal" hidden>
+      <form class="card" id="exportForm">
+        <h2>Export WAV</h2>
+        <label>What to export
+          <select id="exWhat">
+            <option value="song">The song (patterns in the Song strip)</option>
+            <option value="pattern">The current pattern</option>
+          </select>
+        </label>
+        <label id="exLoopsRow">Play it
+          <select id="exLoops">
+            <option value="1">once</option>
+            <option value="2">2 times</option>
+            <option value="4" selected>4 times</option>
+            <option value="8">8 times</option>
+          </select>
+        </label>
+        <label>Tail after the end
+          <select id="exTail">
+            <option value="0">none (loop-ready)</option>
+            <option value="2" selected>2 seconds</option>
+            <option value="5">5 seconds</option>
+          </select>
+        </label>
+        <label>Format
+          <select id="exBits">
+            <option value="16">16-bit WAV (CD quality)</option>
+            <option value="24">24-bit WAV</option>
+            <option value="32">32-bit float WAV</option>
+          </select>
+        </label>
+        <p class="hint" id="exInfo"></p>
+        <button class="primary" id="exGo">Export</button>
+        <button type="button" class="ghost" id="exCancel">Cancel</button>
+      </form>
+    </div>
+
     <div id="picker" class="modal" hidden>
       <form class="card" id="pickerForm">
         <h2 id="pickerTitle">Add a plugin</h2>

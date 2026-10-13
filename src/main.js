@@ -8,6 +8,7 @@ import { PianoRoll } from './pianoroll.js';
 import { ChannelPanel } from './channelpanel.js';
 import { AutomationPanel } from './automation.js';
 import { CATALOG, trustOrigin, nameFromUrl, pluginOrigin } from './plugins.js';
+import { renderProject, download } from './export.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -505,6 +506,53 @@ $('addChannel').onchange = (e) => {
   if (S.isSynth(inst)) openRoll(id);
 };
 
+// ------------------------------------------------------------------ WAV export
+
+function exportSummary() {
+  const p = ui.project;
+  const what = $('exWhat').value;
+  const pats = what === 'song' ? p.song.map((id) => p.patterns.find((x) => x.id === id)).filter(Boolean) : Array(+$('exLoops').value).fill(currentPattern());
+  const bars = pats.reduce((n, x) => n + x.bars, 0);
+  const secs = (bars * 16 * 60) / p.bpm / 4 + +$('exTail').value;
+  $('exInfo').textContent = `${bars} bar${bars === 1 ? '' : 's'} at ${p.bpm} BPM ≈ ${secs.toFixed(1)} s. Mutes and your solos apply.`;
+  $('exLoopsRow').hidden = what === 'song';
+}
+
+$('exportBtn').onclick = () => {
+  const songOpt = $('exWhat').options[0];
+  songOpt.disabled = !ui.project.song.length;
+  if (songOpt.disabled) $('exWhat').value = 'pattern';
+  exportSummary();
+  $('exGo').disabled = false;
+  $('exGo').textContent = 'Export';
+  $('exportModal').hidden = false;
+};
+for (const id of ['exWhat', 'exLoops', 'exTail']) $(id).onchange = exportSummary;
+$('exCancel').onclick = () => ($('exportModal').hidden = true);
+$('exportForm').onsubmit = async (e) => {
+  e.preventDefault();
+  $('exGo').disabled = true;
+  $('exGo').textContent = 'Rendering…';
+  try {
+    await engine.ensure();
+    const res = await renderProject(
+      ui.project,
+      { what: $('exWhat').value, patternId: ui.patternId, loops: +$('exLoops').value, tail: +$('exTail').value, bits: +$('exBits').value },
+      engine,
+    );
+    const name = `${(ui.project.title || 'coprod').replace(/[^\w .-]+/g, '_')}.wav`;
+    download(res.blob, name);
+    $('exportModal').hidden = true;
+    const peak = Number.isFinite(res.peak) ? `peak ${res.peak.toFixed(1)} dBFS${res.peak > -0.1 ? ' (clipping: turn something down)' : ''}` : 'silent';
+    toast(`Exported ${name}: ${res.seconds.toFixed(1)} s, ${peak}${res.problems.length ? `. Left out: ${res.problems.join(', ')}` : ''}`);
+  } catch (err) {
+    toast(`Export failed: ${err.message}`);
+  } finally {
+    $('exGo').disabled = false;
+    $('exGo').textContent = 'Export';
+  }
+};
+
 $('share').onclick = async () => {
   try {
     if (navigator.share && matchMedia('(pointer: coarse)').matches) await navigator.share({ title: 'Jam with me on coprod', url: location.href });
@@ -531,6 +579,7 @@ window.addEventListener('keydown', (e) => {
     undo.redo();
   } else if (e.key === 'Escape') {
     if (!$('picker').hidden) $('picker').hidden = true;
+    else if (!$('exportModal').hidden) $('exportModal').hidden = true;
     else if (ui.rollChannel) closeRoll();
     else if (channelPanel.channelId) channelPanel.close();
     else if (autoPanel.channelId) autoPanel.close();

@@ -405,6 +405,53 @@ try {
   if (restored < 0.95) throw new Error(`volume not restored after stop (${restored})`);
   step('Stopping hands the knobs back (automation overrides cleared)');
 
+  // ---- Vertex user presets ------------------------------------------------
+  await ana.click('#channelPanel .vx-bar > button:has-text("Save")');
+  await ana.fill('#channelPanel .vx-name', 'Ana Lead');
+  await ana.click('#channelPanel button:has-text("Save preset")');
+  await ana.waitForFunction(() => [...document.querySelectorAll('#channelPanel .vx-preset optgroup[label="My presets"] option')].some((o) => o.textContent === 'Ana Lead'));
+  await ben.waitForFunction((id) => window.coprod.engine.slots.get(id)?.node.name === 'Ana Lead', vxId, { timeout: 8000 });
+  step('Ana saves her sound as a preset; it shows under "My presets" (and Ben sees the new name)');
+
+  const presetDl = ana.waitForEvent('download');
+  await ana.click('#channelPanel .vx-bar > button:has-text("Export")');
+  const presetPath = `${dataDir}/ana-lead.vertex.json`;
+  await (await presetDl).saveAs(presetPath);
+  const presetJson = JSON.parse(readFileSync(presetPath, 'utf8'));
+  if (presetJson.format !== 'vertex-preset' || presetJson.name !== 'Ana Lead') throw new Error('bad preset file');
+  await ben.click(`.row[data-id="${vxId}"] .fxbtn`);
+  await ben.waitForSelector('#channelPanel .vx');
+  const chooser2 = ben.waitForEvent('filechooser');
+  await ben.click('#channelPanel .vx-bar > button:has-text("Import")');
+  await (await chooser2).setFiles(presetPath);
+  await ben.waitForFunction(() => [...document.querySelectorAll('#channelPanel .vx-preset optgroup[label="My presets"] option')].some((o) => o.textContent === 'Ana Lead'));
+  step('She exports it as a file; Ben imports it into his own presets');
+
+  // ---- WAV export -----------------------------------------------------------
+  if (await ana.evaluate(() => window.coprod.engine.playing)) await ana.click('#play');
+  await ana.click('#exportBtn');
+  await ana.selectOption('#exWhat', 'pattern');
+  await ana.selectOption('#exLoops', '1');
+  await ana.selectOption('#exTail', '0');
+  const wavDl = ana.waitForEvent('download', { timeout: 30000 });
+  await ana.click('#exGo');
+  const wavPath = `${dataDir}/export.wav`;
+  await (await wavDl).saveAs(wavPath);
+  const wav = readFileSync(wavPath);
+  const dv = new DataView(wav.buffer, wav.byteOffset, wav.byteLength);
+  const channels = dv.getUint16(22, true);
+  const rate = dv.getUint32(24, true);
+  const n = dv.getUint32(40, true) / 2;
+  let sum = 0;
+  for (let i = 0; i < n; i++) sum += (dv.getInt16(44 + i * 2, true) / 32768) ** 2;
+  const seconds = n / channels / rate;
+  const wavRms = Math.sqrt(sum / n);
+  const bpm = await ana.evaluate(() => window.coprod.ui.project.bpm);
+  const expected = (16 * 60) / bpm / 4;
+  if (Math.abs(seconds - expected) > 0.01) throw new Error(`export is ${seconds}s, expected ${expected}s`);
+  if (!(wavRms > 0.01)) throw new Error(`export is silent (rms ${wavRms})`);
+  step(`WAV export: one bar at ${bpm} BPM = ${seconds.toFixed(3)} s, stereo ${rate} Hz, rms ${wavRms.toFixed(3)}`);
+
   // A phone-sized third person.
   const cara = await join_('Cara', { width: 390, height: 844 });
   await cara.waitForFunction(() => document.querySelectorAll('#people .avatar').length === 3);

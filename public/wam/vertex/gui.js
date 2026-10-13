@@ -2,7 +2,7 @@
 
 import { PARAMS, INDEX as I, SOURCES, SOURCE_LABELS, FX_KINDS, FX_LABELS, format, LFO_SHAPES } from './params.js';
 import * as WT from './wavetables.js';
-import { PRESETS } from './presets.js';
+import { PRESETS, userPresets, saveUserPreset, deleteUserPreset, presetFile, parsePresetFile } from './presets.js';
 
 const SRC_COLORS = {
   env1: '#ffb23f', env2: '#ff8a3d', env3: '#ff5f6d', lfo1: '#3ad5ff', lfo2: '#4f8bff', lfo3: '#8f7bff', lfo4: '#c86bff',
@@ -63,6 +63,10 @@ const CSS = `
 .vx-modal input[type=text]{flex:1;min-width:200px;background:#0c0f14;border:1px solid var(--line);border-radius:6px;padding:5px 8px;font-family:ui-monospace,Menlo,monospace}
 .vx-modal input[type=range]{flex:1;accent-color:var(--acc)}
 .vx-err{color:#ff6b6b}
+.vx-bar{display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-top:-4px}
+.vx-bar>button{padding:2px 8px;font-size:10px;color:var(--mut)}
+.vx-bar .vx-top{gap:6px}
+.vx-name{background:#0c0f14;border:1px solid var(--line);border-radius:6px;padding:5px 8px;min-width:180px}
 `;
 
 const h = (tag, cls, text) => {
@@ -275,27 +279,130 @@ export function createGui(node) {
   const top = h('div', 'vx-top');
   const presetBox = h('div', 'vx-preset');
   const presetSel = h('select');
-  presetSel.append(new Option('— Presets —', ''));
-  for (const cat of [...new Set(PRESETS.map((p) => p.category))]) {
-    const og = document.createElement('optgroup');
-    og.label = cat;
-    PRESETS.forEach((p, k) => p.category === cat && og.append(new Option(p.name, k)));
-    presetSel.append(og);
-  }
   const presetName = h('span', '', node.name);
+  presetSel.title = 'Load a preset';
+
+  // Factory presets first, then yours (saved in this browser).
+  const allPresets = () => [
+    ...PRESETS.map((p, k) => ({ key: `f:${k}`, name: p.name, category: p.category, load: () => node.loadPreset(p) })),
+    ...userPresets().map((p) => ({ key: `u:${p.name}`, name: p.name, category: 'My presets', user: true, load: () => node.setState(p.state) })),
+  ];
+  function fillPresets() {
+    presetSel.replaceChildren(new Option('— Presets —', ''));
+    const list = allPresets();
+    for (const cat of [...new Set(list.map((p) => p.category))]) {
+      const og = document.createElement('optgroup');
+      og.label = cat;
+      for (const p of list) if (p.category === cat) og.append(new Option(p.name, p.key));
+      presetSel.append(og);
+    }
+  }
+  fillPresets();
   presetSel.onchange = () => {
-    if (presetSel.value !== '') node.loadPreset(PRESETS[+presetSel.value]);
+    allPresets().find((p) => p.key === presetSel.value)?.load();
     presetSel.value = '';
   };
   const step = (d) => {
-    const k = PRESETS.findIndex((p) => p.name === node.name);
-    node.loadPreset(PRESETS[(k + d + PRESETS.length) % PRESETS.length]);
+    const list = allPresets();
+    const k = list.findIndex((p) => p.name === node.name);
+    list[(k + d + list.length) % list.length].load();
   };
   const prev = h('button', '', '◀');
   const next = h('button', '', '▶');
+  prev.title = 'Previous preset';
+  next.title = 'Next preset';
   prev.onclick = () => step(-1);
   next.onclick = () => step(1);
   presetBox.append(presetName, presetSel);
+
+  // Save / delete / export / import
+  const saveBtn = h('button', '', 'Save');
+  saveBtn.title = 'Save the current sound to your presets (in this browser)';
+  const delBtn = h('button', '', 'Delete');
+  delBtn.title = 'Delete this preset from your presets';
+  const expBtn = h('button', '', 'Export');
+  expBtn.title = 'Download this sound as a preset file';
+  const impBtn = h('button', '', 'Import');
+  impBtn.title = 'Load a preset file';
+  const impFile = h('input');
+  Object.assign(impFile, { type: 'file', accept: '.json,.vertex,application/json', hidden: true });
+  const saveRow = h('div', 'vx-top');
+  saveRow.hidden = true;
+  const saveName = h('input');
+  Object.assign(saveName, { type: 'text', maxLength: 40, placeholder: 'Preset name' });
+  saveName.className = 'vx-name';
+  const saveOk = h('button', 'on', 'Save preset');
+  const saveCancel = h('button', '', 'Cancel');
+  const presetMsg = h('span', 'vx-hint');
+  saveRow.append(h('span', 'vx-hint', 'Save as'), saveName, saveOk, saveCancel);
+  const flash = (text, err = false) => {
+    presetMsg.textContent = text;
+    presetMsg.className = err ? 'vx-err' : 'vx-hint';
+    clearTimeout(flash.t);
+    flash.t = setTimeout(() => (presetMsg.textContent = ''), 4000);
+  };
+  const isUser = () => userPresets().some((p) => p.name === node.name);
+  const syncPresetButtons = () => (delBtn.hidden = !isUser());
+  saveBtn.onclick = () => {
+    saveRow.hidden = false;
+    saveName.value = node.name === 'Init' ? '' : node.name;
+    saveName.focus();
+    saveName.select();
+  };
+  saveCancel.onclick = () => (saveRow.hidden = true);
+  const doSave = async () => {
+    const name = saveName.value.trim();
+    if (!name) return flash('Give the preset a name', true);
+    if (userPresets().some((p) => p.name === name) && name !== node.name && !confirm(`Replace your preset "${name}"?`)) return;
+    const res = saveUserPreset(name, await node.getState());
+    if (!res.ok) return flash(res.error, true);
+    node.setName(name);
+    saveRow.hidden = true;
+    fillPresets();
+    syncPresetButtons();
+    flash(`Saved "${name}" to your presets`);
+  };
+  saveOk.onclick = doSave;
+  saveName.onkeydown = (e) => {
+    if (e.key === 'Enter') doSave();
+    if (e.key === 'Escape') saveRow.hidden = true;
+    e.stopPropagation(); // keep typing out of the host's shortcuts
+  };
+  delBtn.onclick = () => {
+    if (!confirm(`Delete your preset "${node.name}"?`)) return;
+    deleteUserPreset(node.name);
+    fillPresets();
+    syncPresetButtons();
+    flash('Preset deleted');
+  };
+  expBtn.onclick = async () => {
+    const state = await node.getState();
+    const url = URL.createObjectURL(new Blob([presetFile(state)], { type: 'application/json' }));
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${(state.name || 'Vertex preset').replace(/[^\w .-]+/g, '_')}.vertex.json`;
+    document.body.append(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  };
+  impBtn.onclick = () => impFile.click();
+  impFile.onchange = async () => {
+    const f = impFile.files[0];
+    impFile.value = '';
+    if (!f) return;
+    try {
+      const state = parsePresetFile(await f.text());
+      await node.setState(state);
+      const res = saveUserPreset(state.name, state);
+      fillPresets();
+      syncPresetButtons();
+      flash(res.ok ? `Imported "${state.name}" (also added to your presets)` : `Loaded "${state.name}", but couldn't save it: ${res.error}`, !res.ok);
+    } catch (err) {
+      flash(err.message, true);
+    }
+  };
+  syncPresetButtons();
   const tabs = h('div', 'vx-tabs');
   const tabNames = ['OSC', 'FX', 'MATRIX'];
   const tabBtns = tabNames.map((t) => {
@@ -305,6 +412,8 @@ export function createGui(node) {
   });
   tabs.append(...tabBtns);
   top.append(h('span', 'vx-logo', 'VERTEX'), prev, next, presetBox, tabs, knob('vol', 'Volume'));
+  const presetBar = h('div', 'vx-bar');
+  presetBar.append(saveBtn, delBtn, expBtn, impBtn, impFile, saveRow, presetMsg);
 
   // ------------------------------------------------------------------ OSC tab
 
@@ -972,6 +1081,7 @@ export function createGui(node) {
 
   function redrawAll() {
     presetName.textContent = node.name;
+    syncPresetButtons();
     for (const fns of knobs.values()) for (const fn of fns) fn();
     drawWt('a');
     drawWt('b');
@@ -1010,7 +1120,7 @@ export function createGui(node) {
   node.listeners.add(listener);
   root.cleanup = () => node.listeners.delete(listener);
 
-  root.append(top, body);
+  root.append(top, presetBar, body);
   renderEditor();
   showTab('OSC');
   return root;

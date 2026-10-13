@@ -17,7 +17,8 @@ const TICK_MS = 25;
 const json = (v) => JSON.stringify(v ?? null);
 
 export class Engine {
-  constructor() {
+  /** Pass `context` to render somewhere other than the speakers (WAV export). */
+  constructor({ context = null } = {}) {
     this.ctx = null;
     this.project = null;
     this.buses = new Map(); // channelId -> { gain, pan, chain: [], chainKey }
@@ -30,22 +31,30 @@ export class Engine {
     this.samples = new Map(); // sample id -> { status, buffer?, error? }
     this.slots = new Map(); // "ch" or "ch/fx" -> plugin slot
     this.onChange = () => {}; // loading/blocked/error status changed
+    if (context) this.attach(context);
+  }
+
+  attach(ctx) {
+    const comp = ctx.createDynamicsCompressor();
+    comp.threshold.value = -12;
+    comp.ratio.value = 4;
+    this.master = ctx.createGain();
+    this.master.gain.value = 0.8;
+    this.master.connect(comp).connect(ctx.destination);
+    this.ctx = ctx;
+    if (this.project) this.setProject(this.project);
   }
 
   /** Must be called from a user gesture the first time (browser autoplay rules). */
   async ensure() {
-    if (!this.ctx) {
-      const ctx = new (window.AudioContext || window.webkitAudioContext)({ latencyHint: 'interactive' });
-      const comp = ctx.createDynamicsCompressor();
-      comp.threshold.value = -12;
-      comp.ratio.value = 4;
-      this.master = ctx.createGain();
-      this.master.gain.value = 0.8;
-      this.master.connect(comp).connect(ctx.destination);
-      this.ctx = ctx;
-      if (this.project) this.setProject(this.project);
-    }
-    if (this.ctx.state !== 'running') await this.ctx.resume();
+    if (!this.ctx) this.attach(new (window.AudioContext || window.webkitAudioContext)({ latencyHint: 'interactive' }));
+    if (this.ctx.state !== 'running' && this.ctx.resume && !(this.ctx instanceof OfflineAudioContext)) await this.ctx.resume();
+  }
+
+  /** Resolves when every sample and plugin has finished loading (or failed). */
+  async ready() {
+    const pending = [...[...this.samples.values()].map((s) => s.promise), ...[...this.slots.values()].map((s) => s.promise)];
+    await Promise.allSettled(pending.filter(Boolean));
   }
 
   setProject(project) {
@@ -113,7 +122,7 @@ export class Engine {
     if (this.samples.has(id)) return;
     const entry = { status: 'loading' };
     this.samples.set(id, entry);
-    fetch(`/samples/${id}`)
+    entry.promise = fetch(`/samples/${id}`)
       .then((r) => {
         if (!r.ok) throw new Error(r.status === 404 ? 'sample missing on server' : `HTTP ${r.status}`);
         return r.arrayBuffer();
@@ -166,7 +175,7 @@ export class Engine {
       if (!slot) {
         slot = { key, ...w, status: 'loading', docJson: json(w.state), lastJson: null, queue: Promise.resolve() };
         this.slots.set(key, slot);
-        this.loadSlot(slot);
+        slot.promise = this.loadSlot(slot);
         continue;
       }
       slot.on = w.on;
@@ -206,7 +215,7 @@ export class Engine {
   retryBlocked() {
     for (const slot of this.slots.values()) if (slot.status === 'blocked') {
       slot.status = 'loading';
-      this.loadSlot(slot);
+      slot.promise = this.loadSlot(slot);
     }
     this.onChange();
   }

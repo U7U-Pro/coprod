@@ -216,3 +216,66 @@ export function presetState(preset) {
     fxOrder: null,
   };
 }
+
+// ------------------------------------------------------------------ user presets
+
+// Your own presets live in this browser (available in every project) and can
+// be exported/imported as files to move them between devices or people.
+const KEY = 'vertex:user-presets';
+const store = () => {
+  try {
+    return globalThis.localStorage ?? null;
+  } catch {
+    return null;
+  }
+};
+
+/** [{ name, state, saved }] sorted by name. */
+export function userPresets(storage = store()) {
+  try {
+    const list = JSON.parse(storage?.getItem(KEY) ?? '[]');
+    return Array.isArray(list) ? list.filter((p) => p && typeof p.name === 'string' && p.state) : [];
+  } catch {
+    return [];
+  }
+}
+
+export function saveUserPreset(name, state, storage = store()) {
+  name = String(name ?? '').trim().slice(0, 40);
+  if (!name) return { ok: false, error: 'Give the preset a name' };
+  if (!storage) return { ok: false, error: 'This browser does not allow saving' };
+  const list = userPresets(storage).filter((p) => p.name !== name);
+  list.push({ name, state: { ...state, name }, saved: Date.now() });
+  list.sort((a, b) => a.name.localeCompare(b.name));
+  try {
+    storage.setItem(KEY, JSON.stringify(list));
+    return { ok: true };
+  } catch {
+    return { ok: false, error: 'Browser storage is full: delete or export some presets' };
+  }
+}
+
+export function deleteUserPreset(name, storage = store()) {
+  try {
+    storage?.setItem(KEY, JSON.stringify(userPresets(storage).filter((p) => p.name !== name)));
+  } catch {}
+}
+
+/** A preset as a shareable file. */
+export function presetFile(state) {
+  return JSON.stringify({ format: 'vertex-preset', version: 1, name: state.name, state }, null, 1);
+}
+
+/** Read a preset file; throws a readable error if it isn't one. */
+export function parsePresetFile(text) {
+  let data;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    throw new Error('That file is not a Vertex preset');
+  }
+  if (data?.format !== 'vertex-preset' || !data.state || typeof data.state.params !== 'object') {
+    throw new Error('That file is not a Vertex preset');
+  }
+  return { ...data.state, name: String(data.name ?? data.state.name ?? 'Imported').slice(0, 40) };
+}

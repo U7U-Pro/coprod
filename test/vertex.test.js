@@ -303,3 +303,30 @@ test('every factory preset makes sound and stays finite', async () => {
     assert.ok(level > 0.005 && level < 1.5, `${preset.name}: level ${level.toFixed(3)}`);
   }
 });
+
+test('user presets: save, overwrite, delete, export/import', async () => {
+  const P = await import('../public/wam/vertex/presets.js');
+  const mem = new Map();
+  const storage = { getItem: (k) => mem.get(k) ?? null, setItem: (k, v) => mem.set(k, v) };
+  const state = { v: 1, name: 'x', params: { flt_cutoff: 0.3 }, routes: [], lfo: {}, tables: {}, fxOrder: null };
+  assert.equal(P.saveUserPreset('  ', state, storage).ok, false, 'needs a name');
+  assert.ok(P.saveUserPreset('My Bass', state, storage).ok);
+  assert.ok(P.saveUserPreset('A Lead', { ...state, params: { a_pos: 1 } }, storage).ok);
+  assert.ok(P.saveUserPreset('My Bass', { ...state, params: { flt_cutoff: 0.9 } }, storage).ok, 'overwrite');
+  const list = P.userPresets(storage);
+  assert.deepEqual(list.map((p) => p.name), ['A Lead', 'My Bass']);
+  assert.equal(list[1].state.params.flt_cutoff, 0.9);
+  assert.equal(list[1].state.name, 'My Bass');
+  P.deleteUserPreset('A Lead', storage);
+  assert.deepEqual(P.userPresets(storage).map((p) => p.name), ['My Bass']);
+
+  const file = P.presetFile(list[1].state);
+  const back = P.parsePresetFile(file);
+  assert.equal(back.name, 'My Bass');
+  assert.equal(back.params.flt_cutoff, 0.9);
+  assert.throws(() => P.parsePresetFile('{"hello":1}'), /not a Vertex preset/);
+  assert.throws(() => P.parsePresetFile('not json'), /not a Vertex preset/);
+
+  const full = { getItem: () => '[]', setItem: () => { throw new Error('QuotaExceededError'); } };
+  assert.match(P.saveUserPreset('x', state, full).error, /storage is full/);
+});
