@@ -51,6 +51,7 @@ class AcidNode extends GainNode {
     this.voices = new Map(); // note -> [voice]
     this.listeners = new Set();
     this.auto = {}; // host automation overrides while the song plays
+    this.bend = 0; // cents, from MIDI pitch bend (±2 semitones)
   }
 
   get groupId() {
@@ -78,6 +79,7 @@ class AcidNode extends GainNode {
       if (cmd === 0x90 && vel > 0) this.noteOn(note, vel / 127, time);
       else if (cmd === 0x80 || (cmd === 0x90 && vel === 0)) this.noteOff(note, time);
       else if (cmd === 0xb0 && (note === 123 || note === 120)) this.allOff(time);
+      else if (cmd === 0xe0) this.pitchBend((((vel << 7) | note) - 8192) / 8192 * 200, time);
     }
   }
 
@@ -87,6 +89,7 @@ class AcidNode extends GainNode {
     const osc = ctx.createOscillator();
     osc.type = p.wave >= 0.5 ? 'square' : 'sawtooth';
     osc.frequency.value = hz(note);
+    osc.detune.value = this.bend;
     const filter = ctx.createBiquadFilter();
     filter.type = 'lowpass';
     filter.Q.value = 0.7 + p.res * 22;
@@ -108,6 +111,11 @@ class AcidNode extends GainNode {
       const i = list ? list.indexOf(voice) : -1;
       if (i >= 0) list.splice(i, 1);
     };
+  }
+
+  pitchBend(cents, t) {
+    this.bend = cents;
+    for (const list of this.voices.values()) for (const v of list) v.osc.detune.setTargetAtTime(cents, t, 0.005);
   }
 
   noteOff(note, t) {

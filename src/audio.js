@@ -8,7 +8,7 @@
 //     -> bus.gain (volume/mute/solo) -> bus.autoGain (volume automation)
 //     -> [WAM effects...] -> bus.pan -> bus.autoPan (pan automation) -> master
 
-import { instruments } from './instruments.js';
+import { instruments, setBend } from './instruments.js';
 import { STEPS_PER_BAR, INSTRUMENTS, laneValueAt } from './shared/schema.js';
 import { PluginHost, isTrusted, sendEvents } from './plugins.js';
 
@@ -75,6 +75,7 @@ export class Engine {
         bus.autoGain.disconnect();
         bus.pan.disconnect();
         bus.autoPan.disconnect();
+        bus.bend.stop();
         this.buses.delete(id);
       }
     }
@@ -99,10 +100,15 @@ export class Engine {
       const autoGain = this.ctx.createGain();
       const pan = this.ctx.createStereoPanner();
       const autoPan = this.ctx.createStereoPanner();
+      // Pitch bend for built-in sounds: a signal (in cents) every note's
+      // oscillators are connected to while they play.
+      const bend = this.ctx.createConstantSource();
+      bend.offset.value = 0;
+      bend.start();
       gain.connect(autoGain);
       autoGain.connect(pan);
       pan.connect(autoPan).connect(this.master);
-      b = { gain, autoGain, pan, autoPan, chain: [], chainKey: '' };
+      b = { gain, autoGain, pan, autoPan, bend, chain: [], chainKey: '' };
       this.buses.set(channelId, b);
     }
     return b;
@@ -142,6 +148,8 @@ export class Engine {
     if (s?.status !== 'ready') return;
     const src = this.ctx.createBufferSource();
     src.buffer = s.buffer;
+    const bend = this.bus(c.id).bend;
+    bend.connect(src.detune);
     const g = this.ctx.createGain();
     g.gain.setValueAtTime(vel, t);
     src.connect(g).connect(out);
@@ -155,7 +163,12 @@ export class Engine {
     } else {
       src.start(t); // one-shot: let it ring out
     }
-    src.onended = () => g.disconnect();
+    src.onended = () => {
+      g.disconnect();
+      try {
+        bend.disconnect(src.detune);
+      } catch {}
+    };
   }
 
   // ---------------------------------------------------------------- plugins
@@ -304,8 +317,16 @@ export class Engine {
 
   /** Make channel `c` sound at time `t`. */
   voice(c, t, opts) {
-    const out = this.bus(c.id).gain;
-    if (instruments[c.inst]) return instruments[c.inst](this.ctx, out, t, opts);
+    const bus = this.bus(c.id);
+    const out = bus.gain;
+    if (instruments[c.inst]) {
+      setBend(bus.bend);
+      try {
+        return instruments[c.inst](this.ctx, out, t, opts);
+      } finally {
+        setBend(null);
+      }
+    }
     if (c.inst === 'sample' || c.inst === 'samplekeys') return this.playSample(c, out, t, opts);
     if (c.inst === 'wam') {
       const slot = this.slots.get(c.id);
@@ -354,12 +375,15 @@ export class Engine {
       bus.autoGain.gain.setTargetAtTime(1, now, 0.02);
       bus.autoPan.pan.cancelScheduledValues(now);
       bus.autoPan.pan.setTargetAtTime(0, now, 0.02);
+      bus.bend.offset.cancelScheduledValues(now);
+      bus.bend.offset.setTargetAtTime(0, now, 0.02);
     }
     this.laneLast = new Map();
     for (const slot of this.slots.values()) {
       if (slot.status !== 'ready' || slot.kind !== 'inst') continue;
       slot.node.clearEvents?.();
       sendEvents(slot.node, { type: 'wam-midi', time: now, data: { bytes: [0xb0, 123, 0] } }); // all notes off
+      sendEvents(slot.node, { type: 'wam-midi', time: now, data: { bytes: [0xe0, 0, 64] } }); // bend back to center
     }
     this.sendTransport();
   }
@@ -426,6 +450,15 @@ export class Engine {
         const set = (param, value) => (first ? param.setValueAtTime(value, t) : param.linearRampToValueAtTime(value, t));
         if (lane.target === 'vol') set(bus.autoGain.gain, v * v);
         else if (lane.target === 'pan') set(bus.autoPan.pan, v * 2 - 1);
+        else if (lane.target === 'bend') {
+          const c = this.project.channels.find((x) => x.id === lane.ch);
+          if (c?.inst === 'wam') {
+            // Plugins get MIDI pitch bend; their own setting decides the range.
+            const slot = this.slots.get(c.id);
+            const v14 = Math.round(v * 16383);
+            if (slot?.status === 'ready') sendEvents(slot.node, { type: 'wam-midi', time: t, data: { bytes: [0xe0, v14 & 0x7f, v14 >> 7] } });
+          } else set(bus.bend.offset, (v * 2 - 1) * (lane.range ?? 2) * 100);
+        }
         else {
           const [kind, a, b] = lane.target.split(':');
           const slot = this.slots.get(kind === 'p' ? lane.ch : `${lane.ch}/${a}`);

@@ -55,7 +55,11 @@ npm start          # serves dist/ and the sync socket on $PORT (default 3000)
 
   Any WAM can be added by URL.
 - **Automation**: the **A** button on a channel opens lanes for this pattern:
-  volume, pan, or any parameter of the channel's plugin or effects. Click to add
+  volume, pan, **pitch bend**, or any parameter of the channel's plugin or effects.
+  Bend lanes are drawn around a center line (snaps to "no bend"); plugins receive
+  MIDI pitch bend (their own range setting applies, e.g. Vertex's Bend knob), and
+  built-in synths and samples bend by a range you pick (±1 to ±24 semitones),
+  including notes that are already sounding. Click to add
   points, drag to move. Lanes are part of the shared project, so everyone hears them
   when they press play; when playback stops, knobs go back to their saved values.
 - **Multiplayer**: live edits, avatars, colored name tags on the channel each
@@ -161,8 +165,8 @@ worklets some plugins use on secure pages (localhost is fine for development).
 
 ## Ideas / next steps
 
-1. **Pitch bend and slides**: a pitch-bend automation lane, and FL-style slide
-   notes in the piano roll.
+1. **Per-note pitch curves** (like Ableton's): draw the pitch of each note along
+   its length in the piano roll.
 2. **A plugin browser** fed by the WAM community registry, plus more bundled
    plugins (a drum machine, a sampler with slicing).
 3. **Vertex**: more warp modes, a WebAssembly/SIMD engine for more voices, and

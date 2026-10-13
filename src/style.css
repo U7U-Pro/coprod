@@ -1034,6 +1034,14 @@ body.dropping .drop-hint {
   cursor: crosshair;
 }
 
+.auto-panel .ap-range {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
 .auto-panel .ap-lanes {
   flex-wrap: wrap;
 }

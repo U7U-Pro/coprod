@@ -393,11 +393,13 @@ export function setPattern(doc, id, patch) {
 // ------------------------------------------------------------------ automation
 
 /**
- * Automation targets: 'vol' and 'pan' (the channel's mixer), 'p:<paramId>'
+ * Automation targets: 'vol' and 'pan' (the channel's mixer), 'bend' (pitch
+ * bend, 0.5 = none; `range` semitones for built-in sounds), 'p:<paramId>'
  * (a parameter of the channel's plugin instrument), or 'fx:<fxId>:<paramId>'
  * (a parameter of one of its plugin effects). Values are normalized 0..1.
  */
-const TARGET = /^(vol|pan|p:[\w.-]{1,64}|fx:\w{1,16}:[\w.-]{1,64})$/;
+const TARGET = /^(vol|pan|bend|p:[\w.-]{1,64}|fx:\w{1,16}:[\w.-]{1,64})$/;
+export const BEND_RANGES = [1, 2, 3, 5, 7, 12, 24];
 
 export function addLane(doc, patternId, channelId, target, label) {
   const p = findPattern(doc, patternId);
@@ -409,9 +411,19 @@ export function addLane(doc, patternId, channelId, target, label) {
     for (const [k, l] of lanes.entries()) if (l.ch === channelId && l.target === target) id = k;
     if (id) return;
     id = newId();
-    lanes.set(id, { ch: String(channelId), target, label: String(label ?? target).slice(0, 48) });
+    const lane = { ch: String(channelId), target, label: String(label ?? target).slice(0, 48) };
+    if (target === 'bend') lane.range = 2;
+    lanes.set(id, lane);
   });
   return id;
+}
+
+/** Change a lane's settings (currently: a bend lane's range in semitones). */
+export function setLane(doc, patternId, laneId, patch) {
+  const lanes = findPattern(doc, patternId)?.get('auto');
+  const lane = lanes?.get(laneId);
+  if (!lane) return;
+  if (lane.target === 'bend' && BEND_RANGES.includes(patch.range)) lanes.set(laneId, { ...lane, range: patch.range });
 }
 
 function removeLaneIn(p, laneId) {

@@ -2,7 +2,7 @@
 // any parameter of the channel's plugin instrument or plugin effects.
 // Points live in the shared project, so everyone sees (and hears) them.
 
-import { STEPS_PER_BAR, laneValueAt } from './shared/schema.js';
+import { STEPS_PER_BAR, BEND_RANGES, laneValueAt } from './shared/schema.js';
 
 const HEIGHT = 150;
 const PAD = 8;
@@ -33,6 +33,11 @@ export class AutomationPanel {
     this.tabs = root.querySelector('.ap-lanes');
     this.add = root.querySelector('.ap-add');
     this.del = root.querySelector('.ap-del');
+    this.range = root.querySelector('.ap-range');
+    this.rangeNote = root.querySelector('.ap-range-note');
+    const rangeSel = this.range.querySelector('select');
+    for (const r of BEND_RANGES) rangeSel.append(new Option(`±${r} semitone${r > 1 ? 's' : ''}`, r));
+    rangeSel.onchange = () => actions.setLane(this.laneId, { range: +rangeSel.value });
     this.body = root.querySelector('.ap-body');
     this.canvas = root.querySelector('.ap-canvas');
     root.querySelector('.ap-close').onclick = () => this.close();
@@ -111,13 +116,19 @@ export class AutomationPanel {
     );
     if (!lanes.length) this.tabs.append(el('span', 'hint', 'No lanes yet: add one to automate a knob over this pattern.'));
     this.del.hidden = !this.laneId;
+    // Bend range: ours for built-in sounds, the plugin's own for plugins.
+    const lane = this.lane();
+    const isBend = lane?.target === 'bend';
+    this.range.hidden = !isBend || c.inst === 'wam';
+    this.rangeNote.hidden = !isBend || c.inst !== 'wam';
+    if (isBend) this.range.querySelector('select').value = lane.range ?? 2;
     this.fillAddMenu(c, new Set(lanes.map((l) => l.target)));
     this.dirty = true;
   }
 
   /** "+ Add lane" lists the mixer, then each plugin's parameters. */
   async fillAddMenu(c, used) {
-    const groups = [['Mixer', [['vol', 'Volume'], ['pan', 'Pan']]]];
+    const groups = [['Channel', [['vol', 'Volume'], ['pan', 'Pan'], ['bend', 'Pitch bend']]]];
     const slots = [];
     if (c.inst === 'wam') slots.push({ key: c.id, prefix: 'p:', name: c.plugin?.name ?? 'Plugin' });
     for (const f of c.fx ?? []) slots.push({ key: `${c.id}/${f.id}`, prefix: `fx:${f.id}:`, name: f.name });
@@ -164,12 +175,20 @@ export class AutomationPanel {
     const x = e.clientX - r.left;
     const y = e.clientY - r.top;
     const s = x / this.cellW;
+    let v = 1 - (y - PAD) / (HEIGHT - PAD * 2);
+    // Centered lanes (pan, bend) snap to the middle so "no bend" is easy to hit.
+    if (this.centered() && !e.shiftKey && Math.abs(v - 0.5) < 0.04) v = 0.5;
     return {
       s: e.shiftKey ? s : Math.round(s * 4) / 4, // snap to 1/4 step unless Shift
-      v: 1 - (y - PAD) / (HEIGHT - PAD * 2),
+      v,
       x,
       y,
     };
+  }
+
+  centered() {
+    const t = this.lane()?.target;
+    return t === 'bend' || t === 'pan';
   }
 
   hit(pos) {
@@ -241,13 +260,26 @@ export class AutomationPanel {
       this.curve(g, lane.points, W, Y, 'rgba(255,255,255,0.12)', 1);
     }
     const lane = this.lane();
+    const base = this.centered() ? 0.5 : 0;
+    if (base) {
+      g.fillStyle = '#3a4050';
+      g.fillRect(0, Y(0.5), W, 1);
+      g.fillStyle = 'rgba(255,255,255,0.35)';
+      g.font = '10px Inter, system-ui, sans-serif';
+      const c = this.project.channels.find((x) => x.id === this.channelId);
+      const r = lane?.target === 'bend' ? (c?.inst === 'wam' ? null : lane.range ?? 2) : null;
+      const top = lane?.target === 'pan' ? 'R' : r ? `+${r} st` : 'up';
+      const bottom = lane?.target === 'pan' ? 'L' : r ? `−${r} st` : 'down';
+      g.fillText(top, 4, 18);
+      g.fillText(bottom, 4, HEIGHT - 6);
+    }
     if (lane) {
       if (lane.points.length) {
-        // fill under the curve
+        // fill between the curve and the baseline (the middle for pan/bend)
         g.beginPath();
-        g.moveTo(0, Y(0));
+        g.moveTo(0, Y(base));
         for (let x = 0; x <= W; x += 2) g.lineTo(x, Y(laneValueAt(lane.points, x / cw)));
-        g.lineTo(W, Y(0));
+        g.lineTo(W, Y(base));
         g.closePath();
         g.fillStyle = `${color}22`;
         g.fill();

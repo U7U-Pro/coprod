@@ -330,3 +330,19 @@ test('user presets: save, overwrite, delete, export/import', async () => {
   const full = { getItem: () => '[]', setItem: () => { throw new Error('QuotaExceededError'); } };
   assert.match(P.saveUserPreset('x', state, full).error, /storage is full/);
 });
+
+test('pitch bend follows the bend range', () => {
+  const e = synth({ a_pos: 0, flt_on: false, bend: 2 });
+  e.noteOn(69, 100);
+  e.pitchBend(16383); // full up
+  const up = render(e, 0.5).L.slice(SR * 0.1);
+  assert.ok(Math.abs(zeroCrossHz(up) - 493.88) < 4, `+2 st: ${zeroCrossHz(up)} Hz`);
+  e.pitchBend(0); // full down
+  const down = render(e, 0.5).L.slice(SR * 0.1);
+  assert.ok(Math.abs(zeroCrossHz(down) - 392) < 4, `-2 st: ${zeroCrossHz(down)} Hz`);
+  const wide = synth({ a_pos: 0, flt_on: false, bend: 12 });
+  wide.noteOn(69, 100);
+  wide.pitchBend(16383);
+  const oct = render(wide, 0.5).L.slice(SR * 0.1);
+  assert.ok(Math.abs(zeroCrossHz(oct) - 880) < 6, `+12 st: ${zeroCrossHz(oct)} Hz`);
+});

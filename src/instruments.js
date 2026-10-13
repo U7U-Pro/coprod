@@ -39,7 +39,23 @@ function adsr(ctx, time, peak, { a = 0.005, d = 0.1, s = 0.7, r = 0.1 }, dur) {
   return g;
 }
 
+// The engine sets this around each note so its oscillators (and noise
+// players) follow the channel's pitch-bend signal, in cents.
+let bend = null;
+export function setBend(node) {
+  bend = node;
+}
+
 function play(src, time, stopAt) {
+  if (bend && src.detune) {
+    const b = bend;
+    b.connect(src.detune);
+    src.addEventListener('ended', () => {
+      try {
+        b.disconnect(src.detune);
+      } catch {}
+    });
+  }
   src.start(time);
   src.stop(stopAt);
 }

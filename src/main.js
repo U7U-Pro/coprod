@@ -158,6 +158,7 @@ const channelPanel = new ChannelPanel($('channelPanel'), engine, {
 const autoPanel = new AutomationPanel($('autoPanel'), engine, {
   addLane: (ch, target, label) => S.addLane(doc, currentPattern().id, ch, target, label),
   removeLane: (lane) => S.removeLane(doc, currentPattern().id, lane),
+  setLane: (lane, patch) => S.setLane(doc, currentPattern().id, lane, patch),
   setPoint: (lane, point, pos) => S.setPoint(doc, currentPattern().id, lane, point, pos),
   removePoint: (lane, point) => S.removePoint(doc, currentPattern().id, lane, point),
   beginGesture: () => undo.stopCapturing(),

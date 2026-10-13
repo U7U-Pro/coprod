@@ -452,6 +452,80 @@ try {
   if (!(wavRms > 0.01)) throw new Error(`export is silent (rms ${wavRms})`);
   step(`WAV export: one bar at ${bpm} BPM = ${seconds.toFixed(3)} s, stereo ${rate} Hz, rms ${wavRms.toFixed(3)}`);
 
+  // ---- Pitch bend lanes -------------------------------------------------------
+  // On a built-in synth (the bass): add the lane from the menu, draw a bend up.
+  const bassId = await ana.evaluate(() => window.coprod.ui.project.channels.find((c) => c.inst === 'bass').id);
+  await ana.click(`.row[data-id="${bassId}"] .autobtn`);
+  await ana.waitForFunction(() => [...document.querySelectorAll('#autoPanel .ap-add option')].some((o) => o.value.startsWith('bend|')));
+  await ana.selectOption('#autoPanel .ap-add', 'bend|Pitch bend');
+  await ana.waitForSelector('#autoPanel .ap-range:not([hidden])');
+  await ana.selectOption('#autoPanel .ap-range select', '12');
+  await ana.evaluate((id) => {
+    const { doc, S, ui } = window.coprod;
+    const pat = ui.project.patterns[0];
+    const lane = pat.lanes.find((l) => l.ch === id && l.target === 'bend');
+    S.setPoint(doc, pat.id, lane.id, null, { s: 0, v: 0.5 });
+    S.setPoint(doc, pat.id, lane.id, null, { s: 8, v: 1 });
+  }, bassId);
+  await ben.waitForFunction((id) => window.coprod.ui.project.patterns[0].lanes.some((l) => l.ch === id && l.target === 'bend' && l.range === 12 && l.points.length === 2), bassId);
+  await ben.click('#play');
+  const bends = await ben.evaluate(async (id) => {
+    const o = window.coprod.engine.buses.get(id).bend.offset;
+    const seen = [];
+    for (let i = 0; i < 14; i++) {
+      seen.push(o.value);
+      await new Promise((r) => setTimeout(r, 120));
+    }
+    return seen;
+  }, bassId);
+  await ben.click('#play');
+  if (!(Math.max(...bends) > 600)) throw new Error(`bass bend not applied: ${bends.map(Math.round)}`);
+  step(`A ±12 st bend lane on the built-in bass bends it live for Ben (up to +${Math.round(Math.max(...bends))} cents)`);
+
+  // On a plugin (Vertex): prove it in the audio. Hold an A4, bend up halfway
+  // through, export just Vertex, and measure the pitch of each half.
+  await ana.selectOption('#channelPanel .vx-preset select', { label: 'Init' });
+  await ana.waitForTimeout(300);
+  await ana.evaluate((id) => {
+    const { doc, S, ui, engine } = window.coprod;
+    const pat = ui.project.patterns[0];
+    for (const n of pat.notes.filter((x) => x.ch === id)) S.removeNote(doc, pat.id, n.id);
+    // The cutoff lane from earlier nearly closes the filter at the start; drop it
+    // so the measurement hears a steady tone.
+    for (const l of pat.lanes.filter((x) => x.ch === id)) S.removeLane(doc, pat.id, l.id);
+    S.addNote(doc, pat.id, { ch: id, p: 69, s: 0, l: 16 });
+    const lane = S.addLane(doc, pat.id, id, 'bend', 'Pitch bend');
+    S.setPoint(doc, pat.id, lane, null, { s: 0, v: 0.5 });
+    S.setPoint(doc, pat.id, lane, null, { s: 8, v: 0.5 });
+    S.setPoint(doc, pat.id, lane, null, { s: 8.25, v: 1 });
+    engine.solo.clear();
+    engine.setSolo(id, true);
+  }, vxId);
+  await ana.waitForTimeout(1200); // let the Init preset reach the shared state
+  await ana.click('#exportBtn');
+  await ana.selectOption('#exWhat', 'pattern');
+  await ana.selectOption('#exLoops', '1');
+  await ana.selectOption('#exTail', '0');
+  const bendDl = ana.waitForEvent('download', { timeout: 30000 });
+  await ana.click('#exGo');
+  const bendPath = `${dataDir}/bend.wav`;
+  await (await bendDl).saveAs(bendPath);
+  await ana.evaluate(() => window.coprod.engine.solo.clear());
+  const bw = readFileSync(bendPath);
+  const bv = new DataView(bw.buffer, bw.byteOffset, bw.byteLength);
+  const bRate = bv.getUint32(24, true);
+  const left = (i) => bv.getInt16(44 + i * 4, true); // channel 0 of interleaved stereo
+  const pitchIn = (t0, t1) => {
+    let c = 0;
+    for (let i = Math.floor(t0 * bRate) + 1; i < t1 * bRate; i++) if (left(i - 1) < 0 && left(i) >= 0) c++;
+    return c / (t1 - t0);
+  };
+  const pitchBefore = pitchIn(0.15, 0.75);
+  const pitchAfter = pitchIn(1.0, 1.65);
+  if (Math.abs(pitchBefore - 440) > 6 || Math.abs(pitchAfter - 493.9) > 6) throw new Error(`Vertex bend: ${pitchBefore.toFixed(1)} -> ${pitchAfter.toFixed(1)} Hz`);
+  step(`Bend lane on Vertex, measured in the exported WAV: ${pitchBefore.toFixed(1)} Hz → ${pitchAfter.toFixed(1)} Hz (A4 bent +2 st)`);
+  await (await ana.$('#autoPanel')).screenshot({ path: `${SHOTS}11-bend.png` });
+
   // A phone-sized third person.
   const cara = await join_('Cara', { width: 390, height: 844 });
   await cara.waitForFunction(() => document.querySelectorAll('#people .avatar').length === 3);

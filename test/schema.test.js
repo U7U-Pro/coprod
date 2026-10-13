@@ -261,3 +261,16 @@ test('automation lanes: points, interpolation, merge, cleanup', () => {
   assert.equal(S.readProject(a).patterns[0].lanes.length, 0, 'deleting the channel deletes its lanes');
   assert.equal(a.getArray('patterns').get(0).get('autoPts').size, 0);
 });
+
+test('pitch bend lanes carry a range', () => {
+  const doc = new Y.Doc();
+  S.seedProject(doc);
+  const p = S.readProject(doc);
+  const lane = S.addLane(doc, p.patterns[0].id, p.channels[4].id, 'bend', 'Pitch bend');
+  const get = () => S.readProject(doc).patterns[0].lanes.find((l) => l.id === lane);
+  assert.equal(get().range, 2, 'MIDI-standard ±2 semitones by default');
+  S.setLane(doc, p.patterns[0].id, lane, { range: 12 });
+  assert.equal(get().range, 12);
+  S.setLane(doc, p.patterns[0].id, lane, { range: 13 });
+  assert.equal(get().range, 12, 'only listed ranges');
+});
