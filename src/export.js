@@ -70,6 +70,7 @@ export async function renderProject(project, opts, live) {
   engine.playing = true;
   engine.sendTransport();
   engine.laneLast = new Map();
+  engine.laneStepped = new Map();
   let t = lead;
   for (const pattern of patterns) {
     const length = pattern.bars * STEPS_PER_BAR;

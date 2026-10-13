@@ -443,27 +443,112 @@ export function setPoint(doc, patternId, laneId, pointId, { s, v }) {
   if (!p?.get('auto')?.has(laneId)) return null;
   const max = p.get('bars') * STEPS_PER_BAR;
   const id = pointId ?? newId();
-  childMap(p, 'autoPts').set(`${laneId}/${id}`, {
+  const pts = childMap(p, 'autoPts');
+  const key = `${laneId}/${id}`;
+  pts.set(key, {
+    ...pts.get(key), // keep the point's curve settings when it moves
     s: Math.round(Math.max(0, Math.min(max, +s || 0)) * 1000) / 1000,
     v: Math.round(Math.max(0, Math.min(1, +v || 0)) * 1000) / 1000,
   });
   return id;
 }
 
+/**
+ * Curve shapes for the segment that starts at a point, like FL Studio's
+ * automation clips. `t` (-1..1, "amount") bends the curve, or for the
+ * repeating shapes sets how many steps/cycles fit in the segment.
+ */
+export const CURVES = {
+  single: { label: 'Single curve', amount: 'Tension' },
+  double: { label: 'Double curve', amount: 'Tension' },
+  hold: { label: 'Hold', amount: null },
+  stairs: { label: 'Stairs', amount: 'Steps' },
+  smooth: { label: 'Smooth stairs', amount: 'Steps' },
+  pulse: { label: 'Pulse', amount: 'Cycles' },
+  wave: { label: 'Wave', amount: 'Cycles' },
+};
+/** Steps or cycles for the repeating shapes: 2..32, 4 at amount 0. */
+export const curveCount = (t) => Math.max(1, Math.round(2 ** (2 + 3 * t)));
+
+/** Progress from the segment's start value (0) to its end value (1) at x (0..1). */
+export function curveShape(c, t = 0, x) {
+  t = Math.max(-1, Math.min(1, +t || 0));
+  x = Math.max(0, Math.min(1, x));
+  const pw = 1 + 7 * Math.abs(t);
+  switch (c) {
+    case 'double':
+      // S-curve (t > 0: slow-fast-slow), or its inverse (t < 0)
+      if (t >= 0) return x < 0.5 ? 0.5 * (2 * x) ** pw : 1 - 0.5 * (2 - 2 * x) ** pw;
+      return x < 0.5 ? 0.5 * (1 - (1 - 2 * x) ** pw) : 0.5 + 0.5 * (2 * x - 1) ** pw;
+    case 'hold':
+      return x < 1 ? 0 : 1;
+    case 'stairs': {
+      const n = Math.max(2, curveCount(t));
+      return Math.min(1, Math.floor(x * n) / (n - 1));
+    }
+    case 'smooth': {
+      // stairs with rounded corners: hold each level, then ease into the next
+      const n = Math.max(2, curveCount(t));
+      const k = Math.min(n - 1, Math.floor(x * n));
+      const f = x * n - k;
+      if (k === n - 1 || f < 0.6) return k / (n - 1);
+      const e = (f - 0.6) / 0.4;
+      return (k + e * e * (3 - 2 * e)) / (n - 1);
+    }
+    case 'pulse':
+      return Math.floor(x * curveCount(t) * 2) % 2 === 0 ? 0 : 1;
+    case 'wave':
+      return 0.5 - 0.5 * Math.cos(2 * Math.PI * curveCount(t) * x);
+    default:
+      // single curve: t > 0 eases in (starts slow), t < 0 eases out
+      return t >= 0 ? x ** pw : 1 - (1 - x) ** pw;
+  }
+}
+
+/** Shapes with sudden jumps: the engine steps to them instead of ramping. */
+export const STEPPED_CURVES = new Set(['hold', 'stairs', 'pulse']);
+
+/** Set the curve of the segment starting at a point. */
+export function setCurve(doc, patternId, laneId, pointId, { c, t }) {
+  const pts = findPattern(doc, patternId)?.get('autoPts');
+  const key = `${laneId}/${pointId}`;
+  const cur = pts?.get(key);
+  if (!cur) return;
+  const next = { ...cur };
+  if (c !== undefined && Object.hasOwn(CURVES, c)) next.c = c;
+  if (t !== undefined) next.t = Math.round(Math.max(-1, Math.min(1, +t || 0)) * 1000) / 1000;
+  if (next.c === 'single' && !next.t) {
+    delete next.c; // plain linear: store nothing
+    delete next.t;
+  }
+  pts.set(key, next);
+}
+
 export function removePoint(doc, patternId, laneId, pointId) {
   findPattern(doc, patternId)?.get('autoPts')?.delete(`${laneId}/${pointId}`);
 }
 
-/** Value of a lane at position `pos` (steps): linear between points, held at the ends. */
+/** Index of the point whose segment contains `pos` (-1 before the first point). */
+export function segmentAt(points, pos) {
+  let i = -1;
+  while (i + 1 < points.length && points[i + 1].s <= pos) i++;
+  return i;
+}
+
+/**
+ * Value of a lane at position `pos` (steps): each segment follows its curve
+ * (linear unless set otherwise); held flat before the first and after the
+ * last point.
+ */
 export function laneValueAt(points, pos) {
   if (!points.length) return null;
   if (pos <= points[0].s) return points[0].v;
-  for (let i = 1; i < points.length; i++) {
-    const a = points[i - 1];
-    const b = points[i];
-    if (pos <= b.s) return b.s > a.s ? a.v + ((b.v - a.v) * (pos - a.s)) / (b.s - a.s) : b.v;
-  }
-  return points.at(-1).v;
+  const i = segmentAt(points, pos);
+  if (i >= points.length - 1) return points.at(-1).v;
+  const a = points[i];
+  const b = points[i + 1];
+  if (b.s <= a.s) return b.v;
+  return a.v + (b.v - a.v) * curveShape(a.c, a.t, (pos - a.s) / (b.s - a.s));
 }
 
 function readLanes(p) {
@@ -473,7 +558,7 @@ function readLanes(p) {
   for (const [k, pt] of p.get('autoPts')?.entries() ?? []) {
     const [lid, pid] = k.split('/');
     if (!byLane.has(lid)) byLane.set(lid, []);
-    byLane.get(lid).push({ id: pid, s: pt.s, v: pt.v });
+    byLane.get(lid).push({ id: pid, s: pt.s, v: pt.v, c: pt.c ?? 'single', t: pt.t ?? 0 });
   }
   return [...lanes.entries()].map(([id, l]) => ({
     id,

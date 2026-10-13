@@ -526,6 +526,56 @@ try {
   step(`Bend lane on Vertex, measured in the exported WAV: ${pitchBefore.toFixed(1)} Hz → ${pitchAfter.toFixed(1)} Hz (A4 bent +2 st)`);
   await (await ana.$('#autoPanel')).screenshot({ path: `${SHOTS}11-bend.png` });
 
+  // ---- Curves (FL-style): right-click a segment, pick a shape -----------------
+  await ana.click(`.row[data-id="${bassId}"] .autobtn`);
+  await ana.waitForSelector('#autoPanel .ap-range:not([hidden])');
+  const canvas = await ana.$('#autoPanel .ap-canvas');
+  await canvas.scrollIntoViewIfNeeded();
+  const cb = await canvas.boundingBox();
+  const cellW = cb.width / 16;
+  await ana.mouse.click(cb.x + cellW * 4, cb.y + cb.height * 0.75, { button: 'right' });
+  await ana.waitForSelector('#autoPanel .ap-menu:not([hidden])');
+  await ana.click('#autoPanel .ap-curve:has-text("Stairs")');
+  await ben.waitForFunction((id) => window.coprod.ui.project.patterns[0].lanes.find((l) => l.ch === id && l.target === 'bend')?.points[0].c === 'stairs', bassId, { timeout: 8000 });
+  await ana.waitForSelector('#autoPanel .ap-amount');
+  await ana.waitForTimeout(200);
+  await (await ana.$('#autoPanel')).screenshot({ path: `${SHOTS}12-curve-menu.png` });
+  await ana.keyboard.press('Escape');
+  step('Right-click a segment → "Stairs": the curve type reaches Ben');
+
+  // While Ben plays, the bend must sit exactly on the stairs (no ramps between).
+  await ben.click('#play');
+  const stairs = await ben.evaluate(async (id) => {
+    const o = window.coprod.engine.buses.get(id).bend.offset;
+    const seen = [];
+    for (let i = 0; i < 40; i++) {
+      seen.push(o.value);
+      await new Promise((r) => setTimeout(r, 45));
+    }
+    return seen;
+  }, bassId);
+  await ben.click('#play');
+  const offStair = stairs.filter((v) => ![0, 400, 800, 1200].some((s) => Math.abs(v - s) < 2));
+  if (offStair.length || new Set(stairs.map(Math.round)).size < 3) throw new Error(`stair values: ${stairs.map(Math.round)}`);
+  step(`Ben's playback steps through the stairs exactly: ${[...new Set(stairs.map(Math.round))].sort((a, b) => a - b).join(' / ')} cents`);
+
+  // Back to a single curve, then bend it by dragging the middle handle.
+  await ana.mouse.click(cb.x + cellW * 4, cb.y + cb.height * 0.75, { button: 'right' });
+  await ana.click('#autoPanel .ap-curve:has-text("Single curve")');
+  await ana.keyboard.press('Escape');
+  await ana.waitForTimeout(200);
+  const handle = await ana.evaluate(() => window.coprod.autoPanel.handles()[0]);
+  await ana.mouse.move(cb.x + handle.x, cb.y + handle.y);
+  await ana.mouse.down();
+  await ana.mouse.move(cb.x + handle.x, cb.y + handle.y + 40, { steps: 5 });
+  await ana.mouse.up();
+  await ben.waitForFunction((id) => {
+    const p = window.coprod.ui.project.patterns[0].lanes.find((l) => l.ch === id && l.target === 'bend')?.points[0];
+    return p.c === 'single' && p.t > 0.3;
+  }, bassId, { timeout: 8000 });
+  step('Dragging the tension handle bends the curve for everyone');
+  await (await ana.$('#autoPanel')).screenshot({ path: `${SHOTS}13-curve-tension.png` });
+
   // A phone-sized third person.
   const cara = await join_('Cara', { width: 390, height: 844 });
   await cara.waitForFunction(() => document.querySelectorAll('#people .avatar').length === 3);

@@ -2,7 +2,7 @@
 // any parameter of the channel's plugin instrument or plugin effects.
 // Points live in the shared project, so everyone sees (and hears) them.
 
-import { STEPS_PER_BAR, BEND_RANGES, laneValueAt } from './shared/schema.js';
+import { STEPS_PER_BAR, BEND_RANGES, CURVES, curveShape, curveCount, segmentAt, laneValueAt } from './shared/schema.js';
 
 const HEIGHT = 150;
 const PAD = 8;
@@ -56,12 +56,21 @@ export class AutomationPanel {
     const c = this.canvas;
     c.addEventListener('pointerdown', (e) => this.down(e));
     c.addEventListener('pointermove', (e) => this.move(e));
-    c.addEventListener('pointerup', () => (this.drag = null));
+    c.addEventListener('pointerup', (e) => this.up(e));
+    c.addEventListener('pointercancel', () => this.cancelPress());
     c.addEventListener('dblclick', (e) => this.removeAt(e));
+    // Right-click (or long-press on touch) opens the curve menu for a segment.
     c.addEventListener('contextmenu', (e) => {
       e.preventDefault();
-      this.removeAt(e);
+      this.openMenu(e);
     });
+    this.menu = el('div', 'ap-menu');
+    this.menu.hidden = true;
+    root.append(this.menu);
+    document.addEventListener('pointerdown', (e) => {
+      if (!this.menu.hidden && !this.menu.contains(e.target)) this.closeMenu();
+    });
+    document.addEventListener('keydown', (e) => e.key === 'Escape' && this.closeMenu());
     new ResizeObserver(() => (this.dirty = true)).observe(this.body);
   }
 
@@ -199,21 +208,158 @@ export class AutomationPanel {
     return lane.points.find((p) => Math.hypot(X(p.s) - pos.x, Y(p.v) - pos.y) < 9) ?? null;
   }
 
+  /** Tension handles: one in the middle of each segment that has an amount. */
+  handles() {
+    const lane = this.lane();
+    if (!lane) return [];
+    const cw = this.cellW;
+    const Y = (v) => PAD + (1 - v) * (HEIGHT - PAD * 2);
+    const out = [];
+    const pts = lane.points;
+    for (let i = 0; i < pts.length - 1; i++) {
+      const a = pts[i];
+      const b = pts[i + 1];
+      if ((b.s - a.s) * cw < 18 || !CURVES[a.c]?.amount) continue;
+      const mid = (a.s + b.s) / 2;
+      out.push({ i, point: a, x: mid * cw, y: Y(laneValueAt(pts, mid)), rising: b.v >= a.v });
+    }
+    return out;
+  }
+
   down(e) {
     if (e.button !== 0 || !this.laneId) return;
     e.preventDefault();
+    this.closeMenu();
     this.canvas.setPointerCapture(e.pointerId);
     this.actions.beginGesture();
     const pos = this.at(e);
+    // Long-press opens the menu on touch screens.
+    if (e.pointerType === 'touch') {
+      this.press = { x: e.clientX, y: e.clientY, timer: setTimeout(() => this.longPress(e), 500) };
+    }
+    const handle = this.handles().find((h) => Math.hypot(h.x - pos.x, h.y - pos.y) < 8);
+    if (handle) {
+      this.drag = { tension: handle, y: e.clientY, t: handle.point.t ?? 0 };
+      return;
+    }
     const hit = this.hit(pos);
-    const id = hit ? hit.id : this.actions.setPoint(this.laneId, null, { s: pos.s, v: pos.v });
-    this.drag = { id };
+    if (hit) this.drag = { id: hit.id };
+    else if (e.pointerType === 'touch') this.drag = { pending: pos }; // add on tap/drag, not on long-press
+    else this.drag = { id: this.actions.setPoint(this.laneId, null, { s: pos.s, v: pos.v }) };
   }
 
   move(e) {
-    if (!this.drag) return;
+    if (this.press && Math.hypot(e.clientX - this.press.x, e.clientY - this.press.y) > 8) this.cancelPress();
+    const d = this.drag;
+    if (!d) return;
+    if (d.tension) {
+      // Drag the handle toward where the curve should bend.
+      const dy = (d.y - e.clientY) / 70;
+      const single = (d.tension.point.c ?? 'single') === 'single';
+      const t = d.t + (single && d.tension.rising ? -dy : dy);
+      this.actions.setCurve(this.laneId, d.tension.point.id, { t: Math.max(-1, Math.min(1, t)) });
+      return;
+    }
+    if (d.pending) {
+      if (Math.hypot(e.clientX - this.press?.x, e.clientY - this.press?.y) < 6) return;
+      d.id = this.actions.setPoint(this.laneId, null, { s: d.pending.s, v: d.pending.v });
+      delete d.pending;
+    }
     const pos = this.at(e);
-    this.actions.setPoint(this.laneId, this.drag.id, { s: pos.s, v: pos.v });
+    this.actions.setPoint(this.laneId, d.id, { s: pos.s, v: pos.v });
+  }
+
+  up() {
+    if (this.drag?.pending) this.actions.setPoint(this.laneId, null, { s: this.drag.pending.s, v: this.drag.pending.v });
+    this.cancelPress();
+    this.drag = null;
+  }
+
+  cancelPress() {
+    if (this.press) clearTimeout(this.press.timer);
+    this.press = null;
+  }
+
+  longPress(e) {
+    this.press = null;
+    this.drag = null;
+    this.openMenu(e);
+  }
+
+  // ---------------------------------------------------------------- curve menu
+
+  openMenu(e) {
+    const lane = this.lane();
+    if (!lane) return;
+    const r = this.canvas.getBoundingClientRect();
+    const x = e.clientX - r.left;
+    const pts = lane.points;
+    const onPoint = this.hit(this.at(e));
+    const seg = segmentAt(pts, x / this.cellW);
+    const segPoint = seg >= 0 && seg < pts.length - 1 ? pts[seg] : null;
+    if (!segPoint && !onPoint) return;
+    const m = this.menu;
+    m.replaceChildren();
+    if (segPoint) {
+      m.append(el('h4', '', 'Curve'));
+      const list = el('div', 'ap-curves');
+      for (const [c, info] of Object.entries(CURVES)) {
+        const b = el('button', `ap-curve ${segPoint.c === c ? 'on' : ''}`);
+        b.append(curveIcon(c, segPoint.c === c ? segPoint.t : 0), el('span', '', info.label));
+        b.onclick = () => {
+          this.actions.beginGesture();
+          this.actions.setCurve(this.laneId, segPoint.id, { c, t: segPoint.c === c ? segPoint.t : 0 });
+          segPoint.c = c;
+          this.openMenuAt(e, segPoint, onPoint);
+        };
+        list.append(b);
+      }
+      m.append(list);
+      const info = CURVES[segPoint.c];
+      if (info?.amount) {
+        const row = el('label', 'ap-amount');
+        const slider = el('input');
+        Object.assign(slider, { type: 'range', min: -100, max: 100, step: 1, value: Math.round((segPoint.t ?? 0) * 100) });
+        const out = el('output', '', amountText(segPoint.c, segPoint.t ?? 0));
+        slider.onpointerdown = () => this.actions.beginGesture();
+        slider.oninput = () => {
+          const t = slider.value / 100;
+          out.textContent = amountText(segPoint.c, t);
+          this.actions.setCurve(this.laneId, segPoint.id, { t });
+        };
+        const reset = el('button', 'ghost', 'Reset');
+        reset.onclick = () => {
+          slider.value = 0;
+          slider.oninput();
+        };
+        row.append(el('span', '', info.amount), slider, out, reset);
+        m.append(row);
+      }
+    }
+    if (onPoint) {
+      const del = el('button', 'ghost danger ap-delpt', 'Delete point');
+      del.onclick = () => {
+        this.actions.removePoint(this.laneId, onPoint.id);
+        this.closeMenu();
+      };
+      m.append(del);
+    }
+    m.hidden = false;
+    // Place it at the pointer, kept inside the panel.
+    const host = this.root.getBoundingClientRect();
+    const mw = m.offsetWidth;
+    const mh = m.offsetHeight;
+    m.style.left = `${Math.max(4, Math.min(host.width - mw - 4, e.clientX - host.left))}px`;
+    m.style.top = `${Math.max(4, Math.min(host.height - mh - 4, e.clientY - host.top))}px`;
+  }
+
+  /** Re-open after a change, so the slider label matches the new curve type. */
+  openMenuAt(e, segPoint) {
+    requestAnimationFrame(() => this.openMenu({ clientX: e.clientX, clientY: e.clientY, shiftKey: true }));
+  }
+
+  closeMenu() {
+    this.menu.hidden = true;
   }
 
   removeAt(e) {
@@ -290,6 +436,16 @@ export class AutomationPanel {
           g.arc(p.s * cw, Y(p.v), 4, 0, Math.PI * 2);
           g.fill();
         }
+        // tension handles
+        g.lineWidth = 1.5;
+        for (const h of this.handles()) {
+          g.strokeStyle = 'rgba(255,255,255,0.8)';
+          g.fillStyle = '#171a21';
+          g.beginPath();
+          g.arc(h.x, h.y, 3.5, 0, Math.PI * 2);
+          g.fill();
+          g.stroke();
+        }
       } else {
         g.fillStyle = 'rgba(255,255,255,0.4)';
         g.font = '12px Inter, system-ui, sans-serif';
@@ -303,13 +459,47 @@ export class AutomationPanel {
   }
 
   curve(g, points, W, Y, color, width) {
+    // Sample the real shape, so the line shows exactly what plays.
     const cw = this.cellW;
     g.strokeStyle = color;
     g.lineWidth = width;
     g.beginPath();
-    g.moveTo(0, Y(laneValueAt(points, 0)));
-    for (const p of points) g.lineTo(p.s * cw, Y(p.v));
-    g.lineTo(W, Y(points.at(-1).v));
+    for (let x = 0; x <= W; x += 1) {
+      const y = Y(laneValueAt(points, x / cw));
+      if (x) g.lineTo(x, y);
+      else g.moveTo(x, y);
+    }
     g.stroke();
   }
+
+}
+
+function amountText(c, t) {
+  const kind = CURVES[c]?.amount;
+  if (kind === 'Steps' || kind === 'Cycles') return `${Math.max(c === 'pulse' || c === 'wave' ? 1 : 2, curveCount(t))}`;
+  return `${t > 0 ? '+' : ''}${Math.round(t * 100)}%`;
+}
+
+/** A tiny picture of a curve type for the menu. */
+function curveIcon(c, t) {
+  const NS = 'http://www.w3.org/2000/svg';
+  const svg = document.createElementNS(NS, 'svg');
+  svg.setAttribute('viewBox', '0 0 36 20');
+  svg.setAttribute('width', '36');
+  svg.setAttribute('height', '20');
+  const path = document.createElementNS(NS, 'path');
+  let d = '';
+  for (let i = 0; i <= 36; i++) {
+    const x = i / 36;
+    // Show the shape at a typical amount when it's flat at zero.
+    const amt = (c === 'single' || c === 'double') && !t ? 0.45 : t;
+    const y = curveShape(c, amt, x === 1 ? 0.9999 : x);
+    d += `${i ? 'L' : 'M'}${i},${(18 - y * 16).toFixed(1)}`;
+  }
+  path.setAttribute('d', d);
+  path.setAttribute('fill', 'none');
+  path.setAttribute('stroke', 'currentColor');
+  path.setAttribute('stroke-width', '1.6');
+  svg.append(path);
+  return svg;
 }

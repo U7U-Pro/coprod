@@ -161,6 +161,7 @@ const autoPanel = new AutomationPanel($('autoPanel'), engine, {
   setLane: (lane, patch) => S.setLane(doc, currentPattern().id, lane, patch),
   setPoint: (lane, point, pos) => S.setPoint(doc, currentPattern().id, lane, point, pos),
   removePoint: (lane, point) => S.removePoint(doc, currentPattern().id, lane, point),
+  setCurve: (lane, point, curve) => S.setCurve(doc, currentPattern().id, lane, point, curve),
   beginGesture: () => undo.stopCapturing(),
   onClose: () => render(),
 });

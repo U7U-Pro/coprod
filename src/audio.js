@@ -9,7 +9,7 @@
 //     -> [WAM effects...] -> bus.pan -> bus.autoPan (pan automation) -> master
 
 import { instruments, setBend } from './instruments.js';
-import { STEPS_PER_BAR, INSTRUMENTS, laneValueAt } from './shared/schema.js';
+import { STEPS_PER_BAR, INSTRUMENTS, laneValueAt, segmentAt, STEPPED_CURVES } from './shared/schema.js';
 import { PluginHost, isTrusted, sendEvents } from './plugins.js';
 
 const LOOKAHEAD_S = 0.12;
@@ -354,6 +354,7 @@ export class Engine {
     this.patternId = patternId;
     this.cursor = { songIndex: 0, step: 0 };
     this.laneLast = new Map();
+    this.laneStepped = new Map();
     this.nextTime = this.ctx.currentTime + 0.05;
     this.marks = [];
     this.playing = true;
@@ -432,22 +433,34 @@ export class Engine {
     this.scheduleAutomation(pattern, step, time, stepDur);
   }
 
-  /** Play automation lanes: 4 points per step, only when the value changes. */
+  /**
+   * Play automation lanes, only sending values that change: 4 per step for
+   * smooth curves, 16 for the repeating shapes (stairs, pulse, wave).
+   */
   scheduleAutomation(pattern, step, time, stepDur) {
     this.laneLast ??= new Map();
+    this.laneStepped ??= new Map();
     for (const lane of pattern.lanes ?? []) {
       if (!lane.points.length) continue;
       const bus = this.buses.get(lane.ch);
       if (!bus) continue;
-      for (let k = 0; k < 4; k++) {
-        const v = laneValueAt(lane.points, step + k / 4);
-        const t = time + (k * stepDur) / 4;
+      const pts = lane.points;
+      const per = pts.some((p) => p.c !== 'single' && p.c !== 'double') ? 16 : 4;
+      for (let k = 0; k < per; k++) {
+        const pos = step + k / per;
+        const v = laneValueAt(pts, pos);
+        const t = time + (k * stepDur) / per;
         const key = lane.id;
         const first = !this.laneLast.has(key);
+        // Jump (don't ramp) into and out of stepped shapes like hold and stairs.
+        const seg = segmentAt(pts, pos);
+        const nowStepped = seg >= 0 && STEPPED_CURVES.has(pts[seg].c);
+        const stepped = nowStepped || this.laneStepped.get(key);
+        this.laneStepped.set(key, nowStepped);
         if (this.laneLast.get(key) === v) continue;
         this.laneLast.set(key, v);
         // The first value jumps into place; after that, ramp between points.
-        const set = (param, value) => (first ? param.setValueAtTime(value, t) : param.linearRampToValueAtTime(value, t));
+        const set = (param, value) => (first || stepped ? param.setValueAtTime(value, t) : param.linearRampToValueAtTime(value, t));
         if (lane.target === 'vol') set(bus.autoGain.gain, v * v);
         else if (lane.target === 'pan') set(bus.autoPan.pan, v * 2 - 1);
         else if (lane.target === 'bend') {

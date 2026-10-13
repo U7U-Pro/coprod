@@ -59,7 +59,11 @@ npm start          # serves dist/ and the sync socket on $PORT (default 3000)
   Bend lanes are drawn around a center line (snaps to "no bend"); plugins receive
   MIDI pitch bend (their own range setting applies, e.g. Vertex's Bend knob), and
   built-in synths and samples bend by a range you pick (±1 to ±24 semitones),
-  including notes that are already sounding. Click to add
+  including notes that are already sounding.
+  **Curves**, FL Studio-style: right-click a segment (long-press on touch) to pick
+  Single curve, Double curve, Hold, Stairs, Smooth stairs, Pulse or Wave, with an
+  amount slider (tension, or number of steps/cycles); or drag the handle in the
+  middle of a segment to bend it. Click to add
   points, drag to move. Lanes are part of the shared project, so everyone hears them
   when they press play; when playback stops, knobs go back to their saved values.
 - **Multiplayer**: live edits, avatars, colored name tags on the channel each

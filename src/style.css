@@ -1046,6 +1046,87 @@ body.dropping .drop-hint {
   flex-wrap: wrap;
 }
 
+.auto-panel {
+  position: relative;
+}
+
+.ap-menu {
+  position: absolute;
+  z-index: 30;
+  background: var(--panel2);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 8px;
+  box-shadow: 0 10px 30px #0008;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 240px;
+}
+
+.ap-menu h4 {
+  margin: 0 2px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+}
+
+.ap-curves {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px;
+}
+
+.ap-curve {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 4px 6px;
+  font-size: 11px;
+  color: var(--muted);
+  text-align: left;
+}
+
+.ap-curve svg {
+  flex: none;
+}
+
+.ap-curve.on {
+  border-color: #ffb23f;
+  color: var(--text);
+}
+
+.ap-amount {
+  display: grid;
+  grid-template-columns: auto 1fr auto auto;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.ap-amount input {
+  width: 100%;
+  accent-color: #ffb23f;
+}
+
+.ap-amount output {
+  min-width: 34px;
+  text-align: right;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.ap-amount .ghost,
+.ap-delpt {
+  padding: 3px 8px;
+  font-size: 11px;
+}
+
 .autobtn.on {
   color: var(--text);
   border-color: #ffb23f;

@@ -274,3 +274,41 @@ test('pitch bend lanes carry a range', () => {
   S.setLane(doc, p.patterns[0].id, lane, { range: 13 });
   assert.equal(get().range, 12, 'only listed ranges');
 });
+
+test('automation curves: shapes, per-segment settings, moving keeps the curve', () => {
+  const near = (a, b) => Math.abs(a - b) < 1e-6;
+  assert.ok(near(S.curveShape('single', 0, 0.5), 0.5), 'single at 0 is linear');
+  assert.ok(S.curveShape('single', 0.5, 0.5) < 0.2, 'positive tension starts slow');
+  assert.ok(S.curveShape('single', -0.5, 0.5) > 0.8, 'negative tension starts fast');
+  assert.ok(near(S.curveShape('double', 0.7, 0.5), 0.5) && S.curveShape('double', 0.7, 0.25) < 0.1, 'S-curve');
+  assert.deepEqual([0, 0.5, 0.99, 1].map((x) => S.curveShape('hold', 0, x)), [0, 0, 0, 1]);
+  assert.deepEqual([0, 0.3, 0.6, 0.9].map((x) => +S.curveShape('stairs', 0, x).toFixed(3)), [0, 0.333, 0.667, 1]);
+  assert.equal(S.curveCount(-1), 1);
+  assert.equal(S.curveCount(0), 4);
+  assert.equal(S.curveCount(1), 32);
+  assert.deepEqual([0.1, 0.3].map((x) => S.curveShape('pulse', -1, x)).concat(S.curveShape('pulse', -1, 0.6)), [0, 0, 1]);
+  assert.ok(near(S.curveShape('wave', -1, 0.5), 1) && near(S.curveShape('wave', -1, 0), 0));
+
+  const doc = new Y.Doc();
+  S.seedProject(doc);
+  const p = S.readProject(doc);
+  const pid = p.patterns[0].id;
+  const lane = S.addLane(doc, pid, p.channels[0].id, 'vol');
+  const a = S.setPoint(doc, pid, lane, null, { s: 0, v: 0 });
+  S.setPoint(doc, pid, lane, null, { s: 8, v: 1 });
+  S.setCurve(doc, pid, lane, a, { c: 'stairs', t: 0 });
+  const pts = () => S.readProject(doc).patterns[0].lanes[0].points;
+  assert.equal(pts()[0].c, 'stairs');
+  assert.ok(near(S.laneValueAt(pts(), 3), 1 / 3), 'value follows the stairs');
+  S.setPoint(doc, pid, lane, a, { s: 1, v: 0.1 });
+  assert.equal(pts()[0].c, 'stairs', 'moving a point keeps its curve');
+  S.setCurve(doc, pid, lane, a, { t: 5 });
+  assert.equal(pts()[0].t, 1, 'amount clamped');
+  S.setCurve(doc, pid, lane, a, { c: 'nope' });
+  assert.equal(pts()[0].c, 'stairs', 'unknown curve types ignored');
+  S.setCurve(doc, pid, lane, a, { c: 'single', t: 0 });
+  assert.equal(pts()[0].c, 'single', 'back to linear');
+  assert.equal(S.segmentAt(pts(), 0.5), -1);
+  assert.equal(S.segmentAt(pts(), 4), 0);
+  assert.equal(S.segmentAt(pts(), 9), 1);
+});
