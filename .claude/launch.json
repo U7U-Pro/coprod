@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "coprod-dev",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["scripts/dev.mjs"],
+      "port": 5173
+    }
+  ]
+}

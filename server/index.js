@@ -81,8 +81,9 @@ export function startServer({ port = PORT, dataDir = process.env.COPROD_DATA ?? 
       res.end(body);
     } catch {
       try {
+        const index = await readFile(join(DIST, 'index.html'));
         res.writeHead(200, { 'content-type': MIME['.html'], 'cache-control': 'no-cache' });
-        res.end(await readFile(join(DIST, 'index.html')));
+        res.end(index);
       } catch {
         res.writeHead(503, { 'content-type': 'text/plain' });
         res.end('App not built yet. Run `npm run build` first (or `npm run dev` while developing).');
