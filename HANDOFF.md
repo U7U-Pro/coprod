@@ -1,6 +1,6 @@
 # coprod — handoff
 
-Read this first, then `README.md`. Everything below was true at commit `98c4de1`.
+Read this first, then `README.md`. Written at commit `98c4de1`; the "Since `98c4de1`" section below covers what was added after.
 
 ## 1. Goal / objective
 
@@ -43,6 +43,17 @@ npm run build && npm run e2e   # e2e serves dist/ from its own server on a rando
 sh plugins/dexed/build.sh    # rebuild public/wam/dexed/dexed.wasm (see Dexed below)
 ```
 
+## Since `98c4de1` (Windows dev session)
+
+- **Dev on Windows fixed:** `scripts/dev.mjs` spawned through a shell, and `C:Program Files
+odejs
+ode.exe` broke it. It now runs `node` and Vite's `bin/vite.js` directly, and refuses to start on Node older than 20.19 / 22.12 (Vite 8 / rolldown crash there with an unhelpful error). After upgrading Node, run `npm install` again: on Node 18 npm silently skipped rolldown's native binding.
+- **Server crash fixed:** with no `dist/`, `GET /` on the sync server wrote headers twice (`ERR_HTTP_HEADERS_SENT`) and died.
+- **Plugin browser** (Add channel → Plugins, and "Browse all effects…" in the FX panel): one list of the bundled plugins plus the [WAM community registry](https://www.webaudiomodules.com/community/plugins.json) (40 instruments and effects, fetched live; the registry and plugins are served with CORS `*`). Filter chips, search, and an "Effects go on: [channel]" picker. All 42 registry instruments and effects were loaded in coprod's host; all but "Pedalboard WAC2022" (its files 404) worked. Skipped on purpose: Audio Input (asks everyone for the mic), Audio Track (state too big), and the MIDI, modulation and video plugins (they need sequencer.party extensions, `SharedArrayBuffer` or plugin-to-plugin event routing).
+- **Slicer** (`public/wam/slicer/`): a Slicex-style beat slicer. **Grains** (`public/wam/grains/`): a granular synth. Both share `public/wam/kit/`. Audio is uploaded to coprod's sample store, and state is `{ v, sample: {id, name} | null, slices?, params }`. With no file, each uses a deterministic synthesized demo sound, so collaborators match without syncing anything. Slicer maps slice n to MIDI 60 + n (the step grid plays slice 1), with at most 36 slices.
+- **`coprod:notes` DOM event:** a plugin GUI can dispatch it (bubbling, cancelable, `detail.notes = [{p, s, l}]`). `ChannelPanel` replaces that channel's notes in the current pattern, growing it to 2 or 4 bars as needed.
+- **Tests:** `test/samplers.test.js` (15 tests: slicing, hit detection, pitch, fit to tempo, choke, gate, pan law, declicking, grain position, pitch, level and stability). The e2e has 5 more steps (Slicer demo, dropping a loop, To piano roll, Grains playing, position sync). On Windows the e2e runs with Edge: `CHROMIUM_PATH="C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe"`. Its screenshot path now uses `fileURLToPath`, so it works on Windows too.
+
 ## 3. Files
 
 Everything was created in this project; nothing pre-existed. About 7.8k lines of JS
@@ -68,6 +79,7 @@ in src/, server/ and Vertex.
 | `server/samples.js` | Content-addressed sample store (sha256), magic-byte sniffing, 15 MB cap, `nosniff` |
 | `public/wam/vertex/*` | Vertex synth. Files: params, wavetables (FFT mipmaps), engine (voices), fx, processor (AudioWorklet), index (WAM), gui, presets |
 | `public/wam/dexed/*` | Dexed WAM. Files: index.js (WAM + DX7 editor GUI), processor.js, **dexed.wasm (committed binary, 70,671 B)**, `banks/*.syx` (33), LICENSE, README |
+| `public/wam/slicer/*`, `public/wam/grains/*`, `public/wam/kit/*` | Slicer and Grains. Each has engine (plain JS, tested in Node), processor (worklet), index (WAM and state) and gui. The kit holds params, the base node and module, the processor wrapper, sample upload/decode, dsp (onsets and demo sounds) and ui (knobs, waveform, file bar) |
 | `public/wam/coprod-acid`, `coprod-echo` | Small example WAMs (acid synth with 0xE0 bend ±2 st; echo delay) |
 | `plugins/dexed/` | Dexed C++ source for the WASM build. Contents: `dexed_wasm.cpp` (C API), `shim/` (JUCE/Tunings/MTS stubs), `upstream/` (vendored msfa + engines + PluginFx, one include patched), `build.sh`, `UPSTREAM_COMMIT`, GPLv3 `LICENSE` |
 | `test/*.test.js` | Tests: schema, server, wav, vertex (DSP measured offline), dexed (runs the wasm in Node) |
@@ -222,7 +234,6 @@ in src/, server/ and Vertex.
 7. **Shared transport ("play for everyone")**, plus a chat or follow cursor.
 8. **Later:**
    - Web MIDI input.
-   - Plugin browser.
    - Accounts and private rooms.
    - Sample garbage collection and quotas.
    - A desktop VST3/CLAP companion that lets the plugin owner render for everyone.

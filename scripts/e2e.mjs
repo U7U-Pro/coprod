@@ -6,10 +6,11 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync, readFileSync } from 'nod
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright-core';
 import { startServer } from '../server/index.js';
 
-const SHOTS = new URL('../e2e-shots/', import.meta.url).pathname;
+const SHOTS = fileURLToPath(new URL('../e2e-shots/', import.meta.url));
 mkdirSync(SHOTS, { recursive: true });
 const dataDir = mkdtempSync(join(tmpdir(), 'coprod-e2e-'));
 const srv = await startServer({ port: 0, dataDir });
@@ -24,10 +25,10 @@ const foreign = createServer((req, res) => {
 await new Promise((r) => foreign.listen(0, r));
 const FOREIGN_URL = `http://127.0.0.1:${foreign.address().port}/plugins/far-echo/index.js`;
 
-/** A short decaying sine "boom" as a WAV file. */
-function makeWav(path, freq) {
+/** A short decaying sine "boom" as a WAV file (or `hits` of them, half a second apart). */
+function makeWav(path, freq, hits = 1) {
   const rate = 22050;
-  const n = Math.floor(rate * 0.4);
+  const n = Math.floor(rate * (hits > 1 ? hits * 0.5 : 0.4));
   const buf = Buffer.alloc(44 + n * 2);
   buf.write('RIFF', 0);
   buf.writeUInt32LE(36 + n * 2, 4);
@@ -41,12 +42,16 @@ function makeWav(path, freq) {
   buf.writeUInt16LE(16, 34);
   buf.write('data', 36);
   buf.writeUInt32LE(n * 2, 40);
-  for (let i = 0; i < n; i++) buf.writeInt16LE(Math.round(Math.sin((2 * Math.PI * freq * i) / rate) * Math.exp(-i / (rate * 0.1)) * 30000), 44 + i * 2);
+  for (let i = 0; i < n; i++) {
+    const t = i % Math.floor(rate * 0.5); // time since the last hit
+    buf.writeInt16LE(Math.round(Math.sin((2 * Math.PI * freq * t) / rate) * Math.exp(-t / (rate * 0.1)) * 30000), 44 + i * 2);
+  }
   writeFileSync(path, buf);
   return path;
 }
 const boom = makeWav(join(dataDir, 'boom.wav'), 55);
 const snap = makeWav(join(dataDir, 'snap.wav'), 900);
+const loop = makeWav(join(dataDir, 'loop.wav'), 220, 4);
 
 const browser = await chromium.launch({
   executablePath: process.env.CHROMIUM_PATH || undefined,
@@ -220,13 +225,13 @@ try {
   step('Playback drives the plugin with MIDI notes (both pitches played)');
 
   // ---- A plugin from another website --------------------------------------
-  await ana.selectOption('#channelPanel .fx-add', '__url').catch(async () => {
+  await ana.selectOption('#channelPanel .fx-add', '__browse').catch(async () => {
     await ana.click(`.row[data-id="${acidId}"] .fxbtn`);
-    await ana.selectOption('#channelPanel .fx-add', '__url');
+    await ana.selectOption('#channelPanel .fx-add', '__browse');
   });
   await ana.click('#picker summary');
   await ana.fill('#pickerUrl', FOREIGN_URL);
-  await ana.click('#pickerUrlAdd');
+  await ana.click('#pickerUrlFx');
   await ana.waitForFunction(
     (id) => {
       const c = window.coprod.ui.project.channels.find((x) => x.id === id);
@@ -575,6 +580,55 @@ try {
   }, bassId, { timeout: 8000 });
   step('Dragging the tension handle bends the curve for everyone');
   await (await ana.$('#autoPanel')).screenshot({ path: `${SHOTS}13-curve-tension.png` });
+
+  // ---- Slicer and Grains ------------------------------------------------
+  await ana.selectOption('#addChannel', '__plugin');
+  await ana.click('.picker-item:has-text("Slicer")');
+  await ana.waitForSelector('#channelPanel .sl .k-wave canvas');
+  const slicerId = await ana.evaluate(() => window.coprod.ui.project.channels.find((c) => c.name === 'Slicer').id);
+  await ben.waitForFunction((id) => window.coprod.engine.slots.get(id)?.node?.marks?.length === 19, slicerId);
+  step('Ana adds Slicer: its demo break is cut into 19 slices, for Ben too');
+
+  await ana.evaluate((b64) => {
+    const dt = new DataTransfer();
+    dt.items.add(new File([Uint8Array.from(atob(b64), (c) => c.charCodeAt(0))], 'loop.wav', { type: 'audio/wav' }));
+    const wave = document.querySelector('#channelPanel .sl .k-wave');
+    for (const type of ['dragover', 'drop']) wave.dispatchEvent(new DragEvent(type, { bubbles: true, cancelable: true, dataTransfer: dt }));
+  }, readFileSync(loop).toString('base64'));
+  await ben.waitForFunction((id) => {
+    const node = window.coprod.engine.slots.get(id)?.node;
+    return node?.audio?.name === 'loop' && node.marks.length === 4;
+  }, slicerId);
+  const channelCount = (await project(ana)).channels.length;
+  step('Dropping a loop on Slicer cuts it at its 4 hits; Ben gets the same file and slices (and no extra channel)');
+
+  await ana.click('#channelPanel .sl button:has-text("To piano roll")');
+  await ben.waitForFunction(
+    (id) => window.coprod.ui.project.patterns[0].notes.filter((n) => n.ch === id).map((n) => n.p).sort().join() === '60,61,62,63',
+    slicerId,
+  );
+  await (await ana.$('#channelPanel')).screenshot({ path: `${SHOTS}14-slicer.png` });
+  step('"To piano roll" writes notes that play the slices in order (C4, C#4, D4, D#4)');
+
+  await ana.selectOption('#addChannel', '__plugin');
+  await ana.click('.picker-item:has-text("Grains")');
+  await ana.waitForSelector('#channelPanel .gr .k-wave canvas');
+  const grainsId = await ana.evaluate(() => window.coprod.ui.project.channels.find((c) => c.name === 'Grains').id);
+  const hold = await ana.$('#channelPanel .gr-hold');
+  await hold.scrollIntoViewIfNeeded();
+  const box = await hold.boundingBox();
+  await ana.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await ana.mouse.down();
+  await ana.waitForFunction((id) => window.coprod.engine.slots.get(id).node.status?.grains?.length > 0, grainsId);
+  await ana.mouse.up();
+  step('Ana adds Grains and holds a note: grains are playing');
+
+  const wave = await (await ana.$('#channelPanel .gr .k-wave canvas')).boundingBox();
+  await ana.mouse.click(wave.x + wave.width * 0.8, wave.y + wave.height / 2);
+  await ben.waitForFunction((id) => Math.abs(window.coprod.engine.slots.get(id)?.node?.get('position') - 0.8) < 0.02, grainsId);
+  await (await ana.$('#channelPanel')).screenshot({ path: `${SHOTS}15-grains.png` });
+  step('Clicking the Grains waveform moves the grain position for Ben too');
+  if ((await project(ana)).channels.length !== channelCount + 1) throw new Error('unexpected channel count');
 
   // A phone-sized third person.
   const cara = await join_('Cara', { width: 390, height: 844 });

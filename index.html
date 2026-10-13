@@ -153,18 +153,38 @@
     </div>
 
     <div id="picker" class="modal" hidden>
-      <form class="card" id="pickerForm">
-        <h2 id="pickerTitle">Add a plugin</h2>
-        <div id="pickerList" class="picker-list"></div>
+      <form class="card picker-card" id="pickerForm">
+        <h2>Plugins</h2>
+        <div class="picker-tools">
+          <div class="tabs" id="pickerKinds" role="group" aria-label="Show">
+            <button type="button" class="tab" data-kind="all">All</button>
+            <button type="button" class="tab" data-kind="instrument">Instruments</button>
+            <button type="button" class="tab" data-kind="effect">Effects</button>
+          </div>
+          <input id="pickerSearch" type="search" placeholder="Search: reverb, fuzz, drums…" aria-label="Search plugins" />
+        </div>
+        <label class="picker-target" id="pickerTargetRow">
+          Effects go on
+          <select id="pickerTarget"></select>
+        </label>
+        <div id="pickerList" class="picker-list picker-scroll"></div>
+        <p class="hint">
+          Instruments get a new channel. Besides coprod's own, these are the free plugins from the
+          <a href="https://github.com/boourns/wam-community" target="_blank" rel="noopener">WAM community</a>
+          (webaudiomodules.com). Plugins run their own code in your browser; each collaborator is asked once before
+          plugins from another site load for them.
+        </p>
         <details>
           <summary>Load a plugin from a URL</summary>
           <p class="hint">
             Any <a href="https://www.webaudiomodules.com/" target="_blank" rel="noopener">Web Audio Module (WAM 2)</a> works: paste
-            the link to its <code>index.js</code>. Plugins run their own code in your browser, so only use sites you trust.
-            Each collaborator is asked before a plugin from a new site loads for them.
+            the link to its <code>index.js</code>. Only use sites you trust.
           </p>
           <input id="pickerUrl" type="url" placeholder="https://…/index.js" />
-          <button class="primary" id="pickerUrlAdd" type="button">Add from URL</button>
+          <div class="picker-url-actions">
+            <button class="primary" id="pickerUrlInst" type="button">Add as instrument</button>
+            <button class="ghost" id="pickerUrlFx" type="button">Add as effect</button>
+          </div>
         </details>
         <button class="ghost" type="button" id="pickerCancel">Cancel</button>
       </form>

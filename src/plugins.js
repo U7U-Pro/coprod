@@ -12,9 +12,54 @@ import initializeWamHost from '@webaudiomodules/sdk/src/initializeWamHost.js';
 export const CATALOG = [
   { url: '/wam/vertex/index.js', name: 'Vertex', type: 'instrument', about: 'Wavetable synth: unison, warp, mod matrix, 8 effects' },
   { url: '/wam/dexed/index.js', name: 'Dexed', type: 'instrument', about: 'DX7 FM synth (Dexed, GPL) with 1,000+ classic voices' },
+  { url: '/wam/slicer/index.js', name: 'Slicer', type: 'instrument', about: 'Beat slicer: chop a loop at its hits, play slices from notes' },
+  { url: '/wam/grains/index.js', name: 'Grains', type: 'instrument', about: 'Granular synth: turn any sound into pitched grain clouds' },
   { url: '/wam/coprod-acid/index.js', name: 'Acid', type: 'instrument', about: 'Squelchy synth with a resonant filter' },
   { url: '/wam/coprod-echo/index.js', name: 'Echo', type: 'effect', about: 'Tempo-synced feedback delay' },
 ];
+
+/** The WAM community registry (github.com/boourns/wam-community). Served with CORS, so we read it directly. */
+export const COMMUNITY_REGISTRY = 'https://www.webaudiomodules.com/community/plugins.json';
+const COMMUNITY_BASE = 'https://www.webaudiomodules.com/community/plugins/';
+const COMMUNITY_TYPES = { Instrument: 'instrument', Effect: 'effect' }; // MIDI, modulation and video plugins need host features coprod doesn't have
+const COMMUNITY_SKIP = new Set([
+  'com.sequencerParty.audioInput', // asks every collaborator for their microphone
+  'com.sequencerParty.audioTrack', // records audio into its own state, which is too big to share
+  'com.wimmics.pedalboardwac2022', // its files aren't on the server
+]);
+
+let community = null;
+
+/** Instruments and effects from the community registry, in the same shape as CATALOG (plus vendor/thumb/tags). */
+export function communityPlugins() {
+  community ??= fetch(COMMUNITY_REGISTRY)
+    .then((res) => {
+      if (!res.ok) throw new Error(`registry returned ${res.status}`);
+      return res.json();
+    })
+    .then((list) =>
+      list.flatMap((p) => {
+        const type = COMMUNITY_TYPES[p.category?.[0]];
+        if (!type || !p.path || COMMUNITY_SKIP.has(p.identifier)) return [];
+        return [
+          {
+            url: new URL(p.path, COMMUNITY_BASE).href,
+            name: String(p.name ?? 'Plugin'),
+            type,
+            about: String(p.description ?? ''),
+            vendor: String(p.vendor ?? ''),
+            thumb: p.thumbnail ? new URL(p.thumbnail, COMMUNITY_BASE).href : null,
+            tags: [...(p.category ?? []), ...(p.keywords ?? [])].join(' ').toLowerCase(),
+          },
+        ];
+      }),
+    )
+    .catch((err) => {
+      community = null; // try again next time the picker opens
+      throw err;
+    });
+  return community;
+}
 
 const TRUST_KEY = 'coprod:trusted-plugin-origins';
 

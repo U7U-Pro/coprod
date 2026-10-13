@@ -7,7 +7,7 @@ import { Rack } from './rack.js';
 import { PianoRoll } from './pianoroll.js';
 import { ChannelPanel } from './channelpanel.js';
 import { AutomationPanel } from './automation.js';
-import { CATALOG, trustOrigin, nameFromUrl, pluginOrigin } from './plugins.js';
+import { CATALOG, communityPlugins, trustOrigin, nameFromUrl, pluginOrigin } from './plugins.js';
 import { renderProject, download } from './export.js';
 
 const $ = (id) => document.getElementById(id);
@@ -151,7 +151,20 @@ const channelPanel = new ChannelPanel($('channelPanel'), engine, {
     engine.ensure();
     S.addEffect(doc, ch, plugin);
   },
-  addEffectFromUrl: (ch) => pickPlugin('effect', (plugin) => S.addEffect(doc, ch, plugin)),
+  browseEffects: (ch) => openPlugins({ kind: 'effect', channel: ch }),
+  setNotes: (ch, notes) => {
+    // Replace this channel's notes in the current pattern, growing it (up to 4 bars) to fit.
+    const p = currentPattern();
+    const end = Math.max(0, ...notes.map((n) => n.s + n.l));
+    const bars = [1, 2, 4].find((b) => b * S.STEPS_PER_BAR >= end) ?? 4;
+    undo.stopCapturing();
+    doc.transact(() => {
+      if (bars > p.bars) S.setPattern(doc, p.id, { bars });
+      for (const n of p.notes) if (n.ch === ch) S.removeNote(doc, p.id, n.id);
+      for (const n of notes) if (n.s < bars * S.STEPS_PER_BAR) S.addNote(doc, p.id, { ch, p: n.p, s: n.s, l: n.l, v: n.v ?? 100 });
+    });
+    openRoll(ch);
+  },
   onClose: () => render(),
 });
 
@@ -259,35 +272,107 @@ window.addEventListener('drop', (e) => {
   uploadFiles(files, e.target.closest?.('.row')?.dataset.id ?? null);
 });
 
-/** Choose a plugin: one from the catalog, or any WAM by URL. */
-function pickPlugin(type, onPick) {
-  $('pickerTitle').textContent = type === 'instrument' ? 'Add a plugin instrument' : 'Add an effect';
-  const done = (plugin) => {
+/**
+ * The plugin browser: coprod's own plugins, the WAM community's, or any WAM by
+ * URL. Instruments become a new channel; effects go on the chosen channel.
+ * @param {{ kind?: 'all'|'instrument'|'effect', channel?: string }} opts
+ */
+function openPlugins({ kind = 'all', channel } = {}) {
+  const hint = (text) => Object.assign(document.createElement('p'), { className: 'hint', textContent: text });
+  const heading = (text) => Object.assign(document.createElement('h3'), { className: 'picker-group', textContent: text });
+
+  // Where effects go: the channel you opened this from, else the one you last touched.
+  const target = $('pickerTarget');
+  const channels = ui.project.channels;
+  target.replaceChildren(...channels.map((c) => Object.assign(document.createElement('option'), { value: c.id, textContent: c.name })));
+  target.value = [channel, ui.focusChannel].find((id) => channels.some((c) => c.id === id)) ?? channels[0]?.id ?? '';
+
+  const add = (p, type) => {
+    trustOrigin(pluginOrigin(p.url)); // you chose it, so it may run for you
+    const plugin = { url: p.url, name: p.name };
+    if (type === 'effect' && !target.value) return toast('Add a channel first, then put effects on it');
     $('picker').hidden = true;
     engine.ensure();
-    onPick(plugin);
+    if (type === 'instrument') {
+      const id = S.addPluginChannel(doc, plugin);
+      openRoll(id);
+      openChannel(id);
+    } else {
+      S.addEffect(doc, target.value, plugin);
+      openChannel(target.value);
+    }
   };
-  $('pickerList').replaceChildren(
-    ...CATALOG.filter((p) => p.type === type).map((p) => {
-      const b = document.createElement('button');
-      b.type = 'button';
-      b.className = 'picker-item';
-      b.innerHTML = '<b></b><span class="hint"></span>';
-      b.firstChild.textContent = p.name;
-      b.lastChild.textContent = p.about;
-      b.onclick = () => done({ url: p.url, name: p.name });
-      return b;
-    }),
+
+  const item = (p) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'picker-item';
+    b.innerHTML = '<b></b><span class="hint"></span>';
+    b.firstChild.textContent = p.name;
+    b.lastChild.textContent = `${p.vendor || 'Built into coprod'} · ${p.about}`;
+    if (p.thumb) {
+      const img = document.createElement('img');
+      img.src = p.thumb;
+      img.alt = '';
+      img.loading = 'lazy';
+      b.prepend(img);
+      b.classList.add('has-thumb');
+    }
+    b.onclick = () => add(p, p.type);
+    return b;
+  };
+
+  let all = [...CATALOG];
+  let status = 'Loading the WAM community plugins…';
+  const search = $('pickerSearch');
+  search.value = '';
+  const show = () => {
+    for (const b of $('pickerKinds').children) {
+      const n = all.filter((p) => b.dataset.kind === 'all' || p.type === b.dataset.kind).length;
+      b.classList.toggle('on', b.dataset.kind === kind);
+      b.textContent = `${{ all: 'All', instrument: 'Instruments', effect: 'Effects' }[b.dataset.kind]} ${n}`;
+    }
+    $('pickerTargetRow').hidden = kind === 'instrument';
+    const words = search.value.toLowerCase().split(/\s+/).filter(Boolean);
+    const hits = all.filter((p) => words.every((w) => `${p.name} ${p.vendor ?? ''} ${p.about} ${p.tags ?? ''} ${p.type}`.toLowerCase().includes(w)));
+    const out = [];
+    for (const type of ['instrument', 'effect']) {
+      if (kind !== 'all' && kind !== type) continue;
+      const group = hits.filter((p) => p.type === type);
+      if (kind === 'all' && group.length) out.push(heading(type === 'instrument' ? 'Instruments (new channel)' : 'Effects'));
+      out.push(...group.map(item));
+    }
+    if (!out.length) out.push(hint('No matches.'));
+    if (status) out.push(hint(status));
+    $('pickerList').replaceChildren(...out);
+  };
+  for (const b of $('pickerKinds').children) b.onclick = () => ((kind = b.dataset.kind), show());
+  search.oninput = show;
+  show();
+  communityPlugins().then(
+    (community) => {
+      all = [...CATALOG, ...community];
+      status = null;
+      show();
+    },
+    (err) => {
+      status = `Couldn’t load the WAM community list (${err.message}). You can still add a plugin by URL below.`;
+      show();
+    },
   );
+
   $('pickerUrl').value = '';
-  $('pickerUrlAdd').onclick = () => {
+  const fromUrl = (type) => {
     const url = S.cleanPluginUrl($('pickerUrl').value);
     if (!url) return toast('That doesn’t look like a plugin URL');
-    trustOrigin(pluginOrigin(url)); // you chose it, so it may run for you
-    done({ url, name: nameFromUrl(url) });
+    add({ url, name: nameFromUrl(url) }, type);
   };
+  $('pickerUrlInst').onclick = () => fromUrl('instrument');
+  $('pickerUrlFx').onclick = () => fromUrl('effect');
+  $('pickerForm').onsubmit = (e) => e.preventDefault(); // Enter in a field must not reload the page
   $('pickerCancel').onclick = () => ($('picker').hidden = true);
   $('picker').hidden = false;
+  search.focus();
 }
 
 function openRoll(id) {
@@ -485,7 +570,7 @@ for (const id of S.BUILT_IN) {
 }
 for (const [value, label] of [
   ['__sample', 'Sample from a file…'],
-  ['__plugin', 'Plugin instrument…'],
+  ['__plugin', 'Plugins (instruments & effects)…'],
 ]) {
   const o = document.createElement('option');
   o.value = value;
@@ -497,13 +582,7 @@ $('addChannel').onchange = (e) => {
   e.target.value = '';
   if (!inst) return;
   if (inst === '__sample') return pickSample(null);
-  if (inst === '__plugin') {
-    return pickPlugin('instrument', (plugin) => {
-      const id = S.addPluginChannel(doc, plugin);
-      openRoll(id);
-      openChannel(id);
-    });
-  }
+  if (inst === '__plugin') return openPlugins();
   const id = S.addChannel(doc, inst);
   if (S.isSynth(inst)) openRoll(id);
 };

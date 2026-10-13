@@ -38,6 +38,12 @@ export class ChannelPanel {
       if (key) this.scheduleCapture(key);
     };
     for (const type of ['input', 'change', 'pointerup', 'keyup', 'wheel']) root.addEventListener(type, touched, true);
+    // A plugin GUI can hand us notes for this channel (e.g. Slicer's "To piano roll").
+    root.addEventListener('coprod:notes', (e) => {
+      if (!this.channelId || !Array.isArray(e.detail?.notes)) return;
+      e.preventDefault();
+      this.actions.setNotes(this.channelId, e.detail.notes);
+    });
     this.pending = new Map();
     // Some GUIs change state without DOM events (canvas knobs, pointer capture).
     // Not while playing: then automation is moving knobs, and those values
@@ -221,11 +227,11 @@ export class ChannelPanel {
     }
     const add = el('select', { class: 'fx-add', 'aria-label': 'Add an effect' }, el('option', { value: '' }, '+ Add effect…'));
     for (const p of CATALOG.filter((x) => x.type === 'effect')) add.append(el('option', { value: p.url }, `${p.name}: ${p.about}`));
-    add.append(el('option', { value: '__url' }, 'Plugin from a URL…'));
+    add.append(el('option', { value: '__browse' }, 'Browse all effects…'));
     add.onchange = () => {
       const v = add.value;
       add.value = '';
-      if (v === '__url') this.actions.addEffectFromUrl(c.id);
+      if (v === '__browse') this.actions.browseEffects(c.id);
       else if (v) this.actions.addEffect(c.id, CATALOG.find((p) => p.url === v));
     };
     box.append(add);

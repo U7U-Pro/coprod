@@ -51,9 +51,34 @@ npm start          # serves dist/ and the sync socket on $PORT (default 3000)
     **Export**/**Import** them as files to share.
   - **Dexed**, the open-source DX7 emulator compiled to WebAssembly, with its
     1,000+ voices.
+  - **Slicer**, a Slicex-style beat slicer. Drop a loop on it (or use its demo
+    break): it's cut at the hits and fitted to the song's tempo. Slice 1 plays on
+    C4, slice 2 on C#4 and so on, so the step grid triggers slice 1. Click a slice
+    to hear it, double-click to add a cut, drag a cut to move it, right-click it to
+    remove it, or re-cut by hits (with a sensitivity) or into 2-32 equal slices.
+    Each slice has its own gain, pan, pitch and reverse. There are also an envelope,
+    a resonant filter, and "play whole slice" vs "stop on note off" and "cut
+    previous" vs "let ring" modes. **To piano roll** writes the notes that play the
+    loop back in order.
+  - **Grains**, a granular synth. Load any sound (or use its demo texture), click
+    the waveform to choose where grains come from, and play notes. Position, scan
+    (moves through the sound while a note is held), spray, grain size, density,
+    jitter, window shape, pitch, random pitch, reverse amount and stereo spread are
+    all automatable. The cloud is drawn live over the waveform.
+
+    Both store their audio in coprod's sample store, so everyone in the room (and
+    the WAV export) uses the same file.
   - Small **Acid** synth and **Echo** delay examples.
 
-  Any WAM can be added by URL.
+  **Add channel → Plugins** opens one browser with every plugin: the bundled ones
+  plus all the instruments and effects from the
+  [WAM community registry](https://github.com/boourns/wam-community) (Synth-101,
+  the DRM-16 drum sampler, a Soundfont player, Big Muff, Grey Hole and ~30 more
+  pedals), searchable and filterable. Instruments get a new channel; effects go on
+  the channel you pick. MIDI, modulation and video plugins from the registry aren't
+  listed: they need host features coprod doesn't have (event routing between
+  plugins, sequencer.party's extensions, cross-origin isolation). Any other WAM can
+  be added by URL.
 - **Automation**: the **A** button on a channel opens lanes for this pattern:
   volume, pan, **pitch bend**, or any parameter of the channel's plugin or effects.
   Bend lanes are drawn around a center line (snaps to "no bend"); plugins receive
@@ -106,6 +131,13 @@ browser ── edits (Yjs updates) ──► server/rooms.js ──► every oth
   filter, modulation) and `fx.js` are plain JS that run both in the audio worklet and
   in Node tests; `wavetables.js` builds band-limited mipmaps so high notes don't
   alias; `gui.js` is the interface.
+- `public/wam/slicer/`, `public/wam/grains/`: the sample plugins. Each has an
+  `engine.js` (plain JS, tested in Node), a `processor.js` (the audio worklet),
+  `index.js` (the WAM and its shared state) and `gui.js`. They share
+  `public/wam/kit/`: parameter tables, the worklet/event plumbing, sample
+  upload/decoding, transient detection and the demo sounds.
+- Plugin GUIs can hand notes to the channel with a bubbling `coprod:notes` DOM
+  event (`{ notes: [{ p, s, l }] }`); Slicer's "To piano roll" uses it.
 - `src/automation.js`: the automation lane editor; lanes are scheduled in `audio.js`.
 - `src/export.js`, `src/wav.js`: offline rendering and WAV encoding.
 - `plugins/dexed/`: the Dexed port: Dexed's engine source (GPLv3), the small shims
@@ -126,7 +158,8 @@ browser with the same access coprod has. So:
 - A plugin from any other site only loads for you after **you** allow that site
   (remembered in your browser). A collaborator adding one is never enough: you
   see a warning in the FX panel and an "Allow plugins from …" button.
-- Whoever adds a plugin by URL has chosen it, so it's allowed for them.
+- Whoever adds a plugin (by URL or from the community list) has chosen it, so it's
+  allowed for them.
 
 Plugin settings are shared as the plugin's `getState()` JSON, stored per top-level
 key (up to 256 KB each), so turning one knob only sends the part that changed, not
@@ -171,8 +204,8 @@ worklets some plugins use on secure pages (localhost is fine for development).
 
 1. **Per-note pitch curves** (like Ableton's): draw the pitch of each note along
    its length in the piano roll.
-2. **A plugin browser** fed by the WAM community registry, plus more bundled
-   plugins (a drum machine, a sampler with slicing).
+2. **More bundled plugins** (a drum machine), and MIDI plugins from the
+   community registry (arpeggiators, sequencers).
 3. **Vertex**: more warp modes, a WebAssembly/SIMD engine for more voices, and
    live modulation display on the knobs. **Export**: stems (one WAV per channel)
    and MP3.
