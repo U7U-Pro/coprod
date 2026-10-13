@@ -2,10 +2,12 @@
 
 import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { extname, join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
 import { RoomManager, ROOM_NAME } from './rooms.js';
+import { SampleStore, readBody, MAX_SAMPLE_BYTES } from './samples.js';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const DIST = join(ROOT, 'dist');
@@ -18,14 +20,52 @@ const MIME = {
   '.svg': 'image/svg+xml',
   '.png': 'image/png',
   '.woff2': 'font/woff2',
+  '.json': 'application/json',
 };
 
-export function startServer({ port = PORT, dataDir = process.env.COPROD_DATA ?? join(ROOT, 'data', 'rooms') } = {}) {
-  const rooms = new RoomManager({ dataDir });
+function json(res, status, body) {
+  res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+  res.end(JSON.stringify(body));
+}
+
+/**
+ * @param {{ port?: number, dataDir?: string|null }} opts  dataDir holds rooms/ and
+ *   samples/. null keeps rooms in memory only (tests) and samples in a temp dir.
+ */
+export function startServer({ port = PORT, dataDir = process.env.COPROD_DATA ?? join(ROOT, 'data') } = {}) {
+  const rooms = new RoomManager({ dataDir: dataDir && join(dataDir, 'rooms') });
+  const samples = new SampleStore(join(dataDir ?? join(tmpdir(), 'coprod-samples'), 'samples'));
 
   const server = createServer(async (req, res) => {
     const path = decodeURIComponent(new URL(req.url, 'http://x').pathname);
     if (path === '/healthz') return res.end('ok');
+
+    if (path === '/api/samples' && req.method === 'POST') {
+      try {
+        const ip = req.socket.remoteAddress;
+        if (!samples.allow(ip, Number(req.headers['content-length']) || 0)) {
+          return json(res, 429, { error: 'Too many uploads, try again in a few minutes' });
+        }
+        const body = await readBody(req, MAX_SAMPLE_BYTES);
+        return json(res, 200, await samples.put(body));
+      } catch (err) {
+        return json(res, err.status ?? 500, { error: err.status ? err.message : 'Upload failed' });
+      }
+    }
+
+    const sample = path.match(/^\/samples\/([a-f0-9]{64})$/);
+    if (sample) {
+      const found = await samples.get(sample[1]);
+      if (!found) return json(res, 404, { error: 'No such sample' });
+      res.writeHead(200, {
+        'content-type': found.type,
+        'content-length': found.buf.length,
+        'cache-control': 'public, max-age=31536000, immutable', // content-addressed: never changes
+        'x-content-type-options': 'nosniff',
+      });
+      return res.end(found.buf);
+    }
+
     const file = normalize(join(DIST, path === '/' ? 'index.html' : path));
     if (!file.startsWith(DIST)) {
       res.writeHead(403);

@@ -139,3 +139,62 @@ test('meta values are validated', () => {
   assert.equal(p.bpm, 300);
   assert.equal(p.title.length, 60);
 });
+
+test('sample channels: add, replace, and switch between steps and keys', () => {
+  const doc = new Y.Doc();
+  S.seedProject(doc);
+  const id = S.addSampleChannel(doc, { id: 'a'.repeat(64), name: '808 Boom.wav' });
+  let c = S.readProject(doc).channels.find((x) => x.id === id);
+  assert.equal(c.inst, 'sample');
+  assert.equal(c.name, '808 Boom');
+  assert.equal(c.sample.id, 'a'.repeat(64));
+  S.setChannel(doc, id, { inst: 'samplekeys' });
+  assert.equal(S.readProject(doc).channels.find((x) => x.id === id).inst, 'samplekeys');
+
+  // A built-in channel can't be switched to a sample instrument without a sample...
+  const kick = S.readProject(doc).channels[0].id;
+  S.setChannel(doc, kick, { inst: 'sample' });
+  assert.equal(S.readProject(doc).channels[0].inst, 'kick');
+  // ...but dropping a sample on it does.
+  S.setChannelSample(doc, kick, { id: 'b'.repeat(64), name: 'kick2.wav' });
+  c = S.readProject(doc).channels[0];
+  assert.equal(c.inst, 'sample');
+  assert.equal(c.sample.name, 'kick2.wav');
+});
+
+test('plugin channels and effects', () => {
+  const doc = new Y.Doc();
+  S.seedProject(doc);
+  assert.throws(() => S.addPluginChannel(doc, { url: 'javascript:alert(1)', name: 'x' }));
+  assert.equal(S.cleanPluginUrl('//evil.example/x.js'), null);
+  assert.equal(S.cleanPluginUrl('/\\evil.example/x.js'), null, 'browsers treat /\\ like //');
+  const id = S.addPluginChannel(doc, { url: '/wam/coprod-acid/index.js', name: 'Acid' });
+  const c = () => S.readProject(doc).channels.find((x) => x.id === id);
+  assert.equal(c().inst, 'wam');
+  assert.ok(S.isSynth('wam'));
+
+  S.setPluginState(doc, id, { cutoff: 0.4 });
+  assert.deepEqual(c().pluginState, { cutoff: 0.4 });
+  S.setPluginState(doc, id, { blob: 'x'.repeat(S.MAX_PLUGIN_STATE) });
+  assert.deepEqual(c().pluginState, { cutoff: 0.4 }, 'oversized states are not shared');
+
+  const a = S.addEffect(doc, id, { url: '/wam/coprod-echo/index.js', name: 'Echo' });
+  const b = S.addEffect(doc, id, { url: 'https://example.com/fx/index.js', name: 'Fuzz' });
+  assert.deepEqual(c().fx.map((f) => f.name), ['Echo', 'Fuzz']);
+  S.setEffect(doc, id, a, { on: false, state: { time: 0.3 } });
+  assert.equal(c().fx[0].on, false);
+  assert.deepEqual(c().fx[0].state, { time: 0.3 });
+  S.removeEffect(doc, id, b);
+  assert.deepEqual(c().fx.map((f) => f.id), [a]);
+  assert.equal(S.addEffect(doc, id, { url: 'ftp://x/y' }), null);
+});
+
+test('two people adding effects at once keeps both', () => {
+  const [a, b] = peers();
+  const ch = S.readProject(a).channels[0].id;
+  S.addEffect(a, ch, { url: '/wam/coprod-echo/index.js', name: 'Echo' });
+  S.addEffect(b, ch, { url: '/wam/x/index.js', name: 'Other' });
+  sync(a, b);
+  same(a, b);
+  assert.equal(S.readProject(a).channels[0].fx.length, 2);
+});

@@ -2,23 +2,33 @@
 // Clocks"), so timing stays tight even when the UI thread is busy.
 // Every listener renders the shared project locally; only edits travel over
 // the network, never audio.
+//
+// Signal flow per channel:
+//   instrument (built-in synth | sample | WAM plugin)
+//     -> bus.gain (volume/mute/solo) -> [WAM effects...] -> bus.pan -> master
 
 import { instruments } from './instruments.js';
 import { STEPS_PER_BAR, INSTRUMENTS } from './shared/schema.js';
+import { PluginHost, isTrusted, sendEvents } from './plugins.js';
 
 const LOOKAHEAD_S = 0.12;
 const TICK_MS = 25;
+const json = (v) => JSON.stringify(v ?? null);
 
 export class Engine {
   constructor() {
     this.ctx = null;
     this.project = null;
-    this.buses = new Map(); // channelId -> { gain, pan }
+    this.buses = new Map(); // channelId -> { gain, pan, chain: [], chainKey }
     this.solo = new Set(); // solo is per-listener, not shared
     this.playing = false;
     this.mode = 'pattern';
     this.patternId = null; // pattern to loop in pattern mode
     this.marks = []; // [{ time, patternId, step, songIndex }] for the playhead
+    this.host = new PluginHost();
+    this.samples = new Map(); // sample id -> { status, buffer?, error? }
+    this.slots = new Map(); // "ch" or "ch/fx" -> plugin slot
+    this.onChange = () => {}; // loading/blocked/error status changed
   }
 
   /** Must be called from a user gesture the first time (browser autoplay rules). */
@@ -38,6 +48,7 @@ export class Engine {
   }
 
   setProject(project) {
+    const tempoChanged = this.project && this.project.bpm !== project.bpm;
     this.project = project;
     for (const p of project.patterns) {
       p.byStep = new Map();
@@ -51,10 +62,16 @@ export class Engine {
     for (const [id, bus] of this.buses) {
       if (!ids.has(id)) {
         bus.gain.disconnect();
+        bus.pan.disconnect();
         this.buses.delete(id);
       }
     }
-    for (const c of project.channels) this.updateBus(c);
+    for (const c of project.channels) {
+      this.updateBus(c);
+      if (c.sample && INSTRUMENTS[c.inst]?.needs === 'sample') this.loadSample(c.sample.id);
+    }
+    this.reconcileSlots(project);
+    if (tempoChanged) this.sendTransport();
   }
 
   setSolo(channelId, on) {
@@ -69,7 +86,7 @@ export class Engine {
       const gain = this.ctx.createGain();
       const pan = this.ctx.createStereoPanner();
       gain.connect(pan).connect(this.master);
-      b = { gain, pan };
+      b = { gain, pan, chain: [], chainKey: '' };
       this.buses.set(channelId, b);
     }
     return b;
@@ -83,14 +100,213 @@ export class Engine {
     b.pan.pan.setTargetAtTime(c.pan, now, 0.01);
   }
 
+  // ---------------------------------------------------------------- samples
+
+  loadSample(id) {
+    if (this.samples.has(id)) return;
+    const entry = { status: 'loading' };
+    this.samples.set(id, entry);
+    fetch(`/samples/${id}`)
+      .then((r) => {
+        if (!r.ok) throw new Error(r.status === 404 ? 'sample missing on server' : `HTTP ${r.status}`);
+        return r.arrayBuffer();
+      })
+      .then((data) => this.ctx.decodeAudioData(data))
+      .then((buffer) => Object.assign(entry, { status: 'ready', buffer }))
+      .catch((err) => Object.assign(entry, { status: 'error', error: err.message || 'could not decode audio' }))
+      .finally(() => this.onChange());
+  }
+
+  sampleStatus(id) {
+    return this.samples.get(id) ?? { status: this.ctx ? 'loading' : 'idle' };
+  }
+
+  playSample(c, out, t, { pitch, vel, dur }) {
+    const s = this.samples.get(c.sample?.id);
+    if (s?.status !== 'ready') return;
+    const src = this.ctx.createBufferSource();
+    src.buffer = s.buffer;
+    const g = this.ctx.createGain();
+    g.gain.setValueAtTime(vel, t);
+    src.connect(g).connect(out);
+    if (c.inst === 'samplekeys') {
+      // Pitched like a keyboard: the file plays at its own pitch on C4.
+      src.playbackRate.value = 2 ** ((pitch - 60) / 12);
+      g.gain.setValueAtTime(vel, t + dur);
+      g.gain.linearRampToValueAtTime(0, t + dur + 0.03);
+      src.start(t);
+      src.stop(t + dur + 0.04);
+    } else {
+      src.start(t); // one-shot: let it ring out
+    }
+    src.onended = () => g.disconnect();
+  }
+
+  // ---------------------------------------------------------------- plugins
+
+  reconcileSlots(project) {
+    const want = new Map();
+    for (const c of project.channels) {
+      if (c.inst === 'wam' && c.plugin) want.set(c.id, { channel: c.id, kind: 'inst', url: c.plugin.url, state: c.pluginState });
+      for (const f of c.fx ?? []) want.set(`${c.id}/${f.id}`, { channel: c.id, kind: 'fx', url: f.url, state: f.state, on: f.on });
+    }
+    for (const [key, slot] of this.slots) {
+      const w = want.get(key);
+      if (!w || w.url !== slot.url) this.dropSlot(key);
+    }
+    for (const [key, w] of want) {
+      let slot = this.slots.get(key);
+      if (!slot) {
+        slot = { key, ...w, status: 'loading', docJson: json(w.state), lastJson: null, queue: Promise.resolve() };
+        this.slots.set(key, slot);
+        this.loadSlot(slot);
+        continue;
+      }
+      slot.on = w.on;
+      if (slot.status === 'ready' && json(w.state) !== slot.docJson) this.applyState(slot, w.state);
+      else if (slot.status !== 'ready') slot.state = w.state;
+    }
+    for (const c of project.channels) this.rewire(c);
+  }
+
+  async loadSlot(slot) {
+    if (!isTrusted(slot.url)) {
+      slot.status = 'blocked';
+      return this.onChange();
+    }
+    try {
+      const instance = await this.host.create(this.ctx, slot.url, slot.state);
+      if (this.slots.get(slot.key) !== slot) return instance.audioNode?.destroy?.(); // removed meanwhile
+      slot.instance = instance;
+      slot.node = instance.audioNode;
+      slot.descriptor = instance.descriptor;
+      slot.status = 'ready';
+      slot.docJson = json(slot.state);
+      slot.lastJson = slot.node.getState ? json(await slot.node.getState()) : null;
+      if (slot.kind === 'inst') slot.node.connect(this.bus(slot.channel).gain);
+      const c = this.project.channels.find((x) => x.id === slot.channel);
+      if (c) this.rewire(c);
+      this.sendTransport(slot);
+    } catch (err) {
+      slot.status = err.message === 'blocked' ? 'blocked' : 'error';
+      slot.error = err.message || String(err);
+      console.warn(`plugin ${slot.url} failed:`, err);
+    }
+    this.onChange();
+  }
+
+  /** Re-try plugins after the user allowed a new origin. */
+  retryBlocked() {
+    for (const slot of this.slots.values()) if (slot.status === 'blocked') {
+      slot.status = 'loading';
+      this.loadSlot(slot);
+    }
+    this.onChange();
+  }
+
+  dropSlot(key) {
+    const slot = this.slots.get(key);
+    this.slots.delete(key);
+    if (!slot?.node) return;
+    try {
+      slot.node.disconnect();
+      slot.node.destroy?.();
+    } catch {}
+    const bus = this.buses.get(slot.channel);
+    if (bus) bus.chainKey = null; // force a rewire
+  }
+
+  /** Someone else changed the plugin's settings: load them into ours. */
+  applyState(slot, state) {
+    slot.docJson = json(state);
+    slot.queue = slot.queue.then(async () => {
+      if (!slot.node?.setState || state == null) return;
+      await slot.node.setState(state);
+      slot.lastJson = json(await slot.node.getState());
+    });
+  }
+
+  /** Our plugin GUI may have changed: return the new state to share, or null. */
+  async captureState(key) {
+    const slot = this.slots.get(key);
+    if (slot?.status !== 'ready' || !slot.node.getState) return null;
+    await slot.queue;
+    const state = await slot.node.getState();
+    const j = json(state);
+    if (j === slot.lastJson) return null;
+    slot.lastJson = j;
+    slot.docJson = j; // the doc will echo this back; don't re-apply it
+    return state;
+  }
+
+  rewire(c) {
+    const bus = this.bus(c.id);
+    const chain = (c.fx ?? [])
+      .map((f) => ({ f, slot: this.slots.get(`${c.id}/${f.id}`) }))
+      .filter(({ f, slot }) => f.on && slot?.status === 'ready');
+    const key = chain.map(({ f }) => f.id).join(',');
+    if (key === bus.chainKey) return;
+    bus.gain.disconnect();
+    for (const node of bus.chain) {
+      try {
+        node.disconnect();
+      } catch {}
+    }
+    let prev = bus.gain;
+    for (const { slot } of chain) {
+      prev.connect(slot.node);
+      prev = slot.node;
+    }
+    prev.connect(bus.pan);
+    bus.chain = chain.map(({ slot }) => slot.node);
+    bus.chainKey = key;
+  }
+
+  slotStatus(key) {
+    const s = this.slots.get(key);
+    return s ? { status: s.status, error: s.error, url: s.url } : { status: this.ctx ? 'loading' : 'idle' };
+  }
+
+  sendTransport(only) {
+    if (!this.ctx || !this.project) return;
+    const event = {
+      type: 'wam-transport',
+      time: this.ctx.currentTime,
+      data: {
+        currentBar: 0,
+        currentBarStarted: this.ctx.currentTime,
+        tempo: this.project.bpm,
+        timeSigNumerator: 4,
+        timeSigDenominator: 4,
+        playing: this.playing,
+      },
+    };
+    for (const slot of only ? [only] : this.slots.values()) if (slot.status === 'ready') sendEvents(slot.node, event);
+  }
+
+  // ---------------------------------------------------------------- voices
+
+  /** Make channel `c` sound at time `t`. */
+  voice(c, t, opts) {
+    const out = this.bus(c.id).gain;
+    if (instruments[c.inst]) return instruments[c.inst](this.ctx, out, t, opts);
+    if (c.inst === 'sample' || c.inst === 'samplekeys') return this.playSample(c, out, t, opts);
+    if (c.inst === 'wam') {
+      const slot = this.slots.get(c.id);
+      if (slot?.status !== 'ready') return;
+      const vel = Math.max(1, Math.min(127, Math.round(opts.vel * 127)));
+      sendEvents(
+        slot.node,
+        { type: 'wam-midi', time: t, data: { bytes: [0x90, opts.pitch, vel] } },
+        { type: 'wam-midi', time: t + opts.dur, data: { bytes: [0x80, opts.pitch, 0] } },
+      );
+    }
+  }
+
   /** Play one note right now (clicking a key or placing a note). */
   preview(channel, pitch = INSTRUMENTS[channel.inst]?.root ?? 60, dur = 0.3) {
     if (!this.ctx || this.ctx.state !== 'running') return;
-    instruments[channel.inst]?.(this.ctx, this.bus(channel.id).gain, this.ctx.currentTime + 0.005, {
-      pitch,
-      vel: 0.8,
-      dur,
-    });
+    this.voice(channel, this.ctx.currentTime + 0.005, { pitch, vel: 0.8, dur });
   }
 
   // ---------------------------------------------------------------- transport
@@ -103,6 +319,7 @@ export class Engine {
     this.nextTime = this.ctx.currentTime + 0.05;
     this.marks = [];
     this.playing = true;
+    this.sendTransport();
     clearInterval(this.timer);
     this.timer = setInterval(() => this.tick(), TICK_MS);
     this.tick();
@@ -112,6 +329,14 @@ export class Engine {
     this.playing = false;
     clearInterval(this.timer);
     this.marks = [];
+    if (!this.ctx) return;
+    const now = this.ctx.currentTime;
+    for (const slot of this.slots.values()) {
+      if (slot.status !== 'ready' || slot.kind !== 'inst') continue;
+      slot.node.clearEvents?.();
+      sendEvents(slot.node, { type: 'wam-midi', time: now, data: { bytes: [0xb0, 123, 0] } }); // all notes off
+    }
+    this.sendTransport();
   }
 
   currentPattern() {
@@ -147,18 +372,13 @@ export class Engine {
 
   scheduleStep(pattern, step, time, stepDur) {
     for (const c of this.project.channels) {
-      const play = instruments[c.inst];
-      if (!play) continue;
-      const out = this.bus(c.id).gain;
-      if (INSTRUMENTS[c.inst].kind === 'drum') {
-        const vel = pattern.steps.get(`${c.id}:${step}`);
-        if (vel) play(this.ctx, out, time, { pitch: 60, vel: vel / 127, dur: stepDur });
-      }
+      if (INSTRUMENTS[c.inst]?.kind !== 'drum') continue;
+      const vel = pattern.steps.get(`${c.id}:${step}`);
+      if (vel) this.voice(c, time, { pitch: 60, vel: vel / 127, dur: stepDur });
     }
     for (const n of pattern.byStep?.get(step) ?? []) {
       const c = this.project.channels.find((x) => x.id === n.ch);
-      if (!c) continue;
-      instruments[c.inst]?.(this.ctx, this.bus(c.id).gain, time, { pitch: n.p, vel: n.v / 127, dur: n.l * stepDur });
+      if (c) this.voice(c, time, { pitch: n.p, vel: n.v / 127, dur: n.l * stepDur });
     }
   }
 

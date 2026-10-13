@@ -5,6 +5,8 @@ import * as S from './shared/schema.js';
 import { Engine } from './audio.js';
 import { Rack } from './rack.js';
 import { PianoRoll } from './pianoroll.js';
+import { ChannelPanel } from './channelpanel.js';
+import { CATALOG, trustOrigin, nameFromUrl, pluginOrigin } from './plugins.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -26,6 +28,7 @@ const provider = new WebsocketProvider(`${location.protocol === 'https:' ? 'wss'
 const awareness = provider.awareness;
 const undo = new Y.UndoManager(S.undoScope(doc), { captureTimeout: 400 });
 const engine = new Engine();
+engine.onChange = () => render();
 
 const ui = {
   project: null,
@@ -110,6 +113,7 @@ const rack = new Rack($('rack'), {
     if (c) engine.ensure().then(() => engine.preview(c));
   },
   openRoll: (id) => openRoll(id),
+  openChannel: (id) => openChannel(id),
   focusChannel,
 });
 
@@ -124,6 +128,145 @@ const roll = new PianoRoll($('roll'), {
   },
   cursor: throttle((pos) => publishPresence({ cursor: pos }), 50),
 });
+
+// ------------------------------------------------------------------ samples + plugins
+
+const channelPanel = new ChannelPanel($('channelPanel'), engine, {
+  saveState: (key, state) => {
+    const [ch, fx] = key.split('/');
+    if (fx) S.setEffect(doc, ch, fx, { state });
+    else S.setPluginState(doc, ch, state);
+  },
+  allowOrigin: (origin) => {
+    trustOrigin(origin);
+    engine.retryBlocked();
+  },
+  pickSample: (id) => pickSample(id),
+  setEffect: (ch, fx, patch) => S.setEffect(doc, ch, fx, patch),
+  removeEffect: (ch, fx) => S.removeEffect(doc, ch, fx),
+  addEffect: (ch, plugin) => {
+    engine.ensure();
+    S.addEffect(doc, ch, plugin);
+  },
+  addEffectFromUrl: (ch) => pickPlugin('effect', (plugin) => S.addEffect(doc, ch, plugin)),
+  onClose: () => render(),
+});
+
+function openChannel(id) {
+  focusChannel(id);
+  engine.ensure(); // plugins need running audio to load
+  channelPanel.open(id);
+  render();
+  $('channelPanel').scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+}
+
+/** Short status for a channel's row: is its sample/plugin usable yet? */
+function channelStatus(c) {
+  if (!engine.ctx) return null;
+  if (c.sample && S.INSTRUMENTS[c.inst].needs === 'sample') {
+    const st = engine.sampleStatus(c.sample.id).status;
+    if (st === 'loading') return { text: 'loading…', level: 'info' };
+    if (st === 'error') return { text: 'sample missing', level: 'bad' };
+  }
+  const keys = [...(c.inst === 'wam' ? [c.id] : []), ...c.fx.map((f) => `${c.id}/${f.id}`)];
+  const states = keys.map((k) => engine.slotStatus(k).status);
+  if (states.includes('blocked')) return { text: 'plugin blocked: open FX', level: 'warn' };
+  if (states.includes('error')) return { text: 'plugin failed', level: 'bad' };
+  if (states.includes('loading')) return { text: 'loading plugin…', level: 'info' };
+  return null;
+}
+
+let sampleTarget = null; // channel to replace, or null for new channels
+function pickSample(channelId = null) {
+  sampleTarget = channelId;
+  $('fileInput').value = '';
+  $('fileInput').click();
+}
+$('fileInput').onchange = () => uploadFiles([...$('fileInput').files], sampleTarget);
+
+async function uploadFiles(files, targetChannel = null) {
+  engine.ensure();
+  for (const [i, file] of files.entries()) {
+    if (file.size > 15 * 1024 * 1024) {
+      toast(`${file.name} is over 15 MB`);
+      continue;
+    }
+    toast(`Uploading ${file.name}…`);
+    try {
+      const res = await fetch('/api/samples', { method: 'POST', body: file, headers: { 'content-type': file.type || 'application/octet-stream' } });
+      const out = await res.json();
+      if (!res.ok) throw new Error(out.error ?? `HTTP ${res.status}`);
+      const sample = { id: out.id, name: file.name };
+      if (targetChannel && i === 0) S.setChannelSample(doc, targetChannel, sample);
+      else S.addSampleChannel(doc, sample);
+      toast(`Added ${file.name}`);
+    } catch (err) {
+      toast(`${file.name}: ${err.message}`);
+    }
+  }
+}
+
+// Drag and drop audio files onto the page or onto a channel.
+let dragDepth = 0;
+const hasFiles = (e) => [...(e.dataTransfer?.types ?? [])].includes('Files');
+window.addEventListener('dragenter', (e) => {
+  if (!hasFiles(e)) return;
+  dragDepth++;
+  document.body.classList.add('dropping');
+});
+window.addEventListener('dragleave', () => {
+  if (--dragDepth <= 0) {
+    dragDepth = 0;
+    document.body.classList.remove('dropping');
+  }
+});
+window.addEventListener('dragover', (e) => {
+  if (!hasFiles(e)) return;
+  e.preventDefault();
+  for (const r of document.querySelectorAll('.row.drop')) r.classList.remove('drop');
+  e.target.closest?.('.row')?.classList.add('drop');
+});
+window.addEventListener('drop', (e) => {
+  if (!hasFiles(e)) return;
+  e.preventDefault();
+  dragDepth = 0;
+  document.body.classList.remove('dropping');
+  for (const r of document.querySelectorAll('.row.drop')) r.classList.remove('drop');
+  const files = [...e.dataTransfer.files].filter((f) => f.type.startsWith('audio/') || /\.(wav|mp3|ogg|flac|m4a)$/i.test(f.name));
+  if (!files.length) return toast('Drop audio files (wav, mp3, ogg, flac, m4a)');
+  uploadFiles(files, e.target.closest?.('.row')?.dataset.id ?? null);
+});
+
+/** Choose a plugin: one from the catalog, or any WAM by URL. */
+function pickPlugin(type, onPick) {
+  $('pickerTitle').textContent = type === 'instrument' ? 'Add a plugin instrument' : 'Add an effect';
+  const done = (plugin) => {
+    $('picker').hidden = true;
+    engine.ensure();
+    onPick(plugin);
+  };
+  $('pickerList').replaceChildren(
+    ...CATALOG.filter((p) => p.type === type).map((p) => {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'picker-item';
+      b.innerHTML = '<b></b><span class="hint"></span>';
+      b.firstChild.textContent = p.name;
+      b.lastChild.textContent = p.about;
+      b.onclick = () => done({ url: p.url, name: p.name });
+      return b;
+    }),
+  );
+  $('pickerUrl').value = '';
+  $('pickerUrlAdd').onclick = () => {
+    const url = S.cleanPluginUrl($('pickerUrl').value);
+    if (!url) return toast('That doesn’t look like a plugin URL');
+    trustOrigin(pluginOrigin(url)); // you chose it, so it may run for you
+    done({ url, name: nameFromUrl(url) });
+  };
+  $('pickerCancel').onclick = () => ($('picker').hidden = true);
+  $('picker').hidden = false;
+}
 
 function openRoll(id) {
   ui.rollChannel = id;
@@ -203,7 +346,8 @@ function renderNow() {
   $('deletePattern').disabled = p.patterns.length <= 1;
 
   // Rack + roll
-  rack.render(p, pattern, { solo: engine.solo, selectedChannel: ui.rollChannel, remote });
+  rack.render(p, pattern, { solo: engine.solo, selectedChannel: ui.rollChannel ?? channelPanel.channelId, remote, status: channelStatus });
+  channelPanel.render(p);
   const rollCh = channelById(ui.rollChannel);
   if (ui.rollChannel && (!rollCh || !S.isSynth(rollCh.inst))) closeRoll();
   else if (rollCh) {
@@ -308,16 +452,33 @@ $('bars').onchange = (e) => S.setPattern(doc, ui.patternId, { bars: +e.target.va
 $('songAdd').onclick = () => S.songAppend(doc, ui.patternId);
 $('rollClose').onclick = closeRoll;
 
-for (const [id, info] of Object.entries(S.INSTRUMENTS)) {
+for (const id of S.BUILT_IN) {
   const o = document.createElement('option');
   o.value = id;
-  o.textContent = `${info.label} (${info.kind})`;
+  o.textContent = `${S.INSTRUMENTS[id].label} (${S.INSTRUMENTS[id].kind})`;
+  $('addChannel').append(o);
+}
+for (const [value, label] of [
+  ['__sample', 'Sample from a file…'],
+  ['__plugin', 'Plugin instrument…'],
+]) {
+  const o = document.createElement('option');
+  o.value = value;
+  o.textContent = label;
   $('addChannel').append(o);
 }
 $('addChannel').onchange = (e) => {
   const inst = e.target.value;
   e.target.value = '';
   if (!inst) return;
+  if (inst === '__sample') return pickSample(null);
+  if (inst === '__plugin') {
+    return pickPlugin('instrument', (plugin) => {
+      const id = S.addPluginChannel(doc, plugin);
+      openRoll(id);
+      openChannel(id);
+    });
+  }
   const id = S.addChannel(doc, inst);
   if (S.isSynth(inst)) openRoll(id);
 };
@@ -346,7 +507,11 @@ window.addEventListener('keydown', (e) => {
   } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'y' && !typing) {
     e.preventDefault();
     undo.redo();
-  } else if (e.key === 'Escape' && ui.rollChannel) closeRoll();
+  } else if (e.key === 'Escape') {
+    if (!$('picker').hidden) $('picker').hidden = true;
+    else if (ui.rollChannel) closeRoll();
+    else if (channelPanel.channelId) channelPanel.close();
+  }
 });
 
 // ------------------------------------------------------------------ welcome
@@ -413,4 +578,4 @@ welcome();
 requestAnimationFrame(loop);
 
 // Handy for debugging and for the end-to-end test.
-window.coprod = { doc, provider, engine, ui, S };
+window.coprod = { doc, provider, engine, ui, S, channelPanel };

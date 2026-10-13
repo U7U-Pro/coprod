@@ -5,7 +5,7 @@
 // slider someone is dragging is never replaced under their finger while
 // other people's edits stream in.
 
-import { INSTRUMENTS, STEPS_PER_BAR, isSynth } from './shared/schema.js';
+import { INSTRUMENTS, BUILT_IN, STEPS_PER_BAR, isSynth } from './shared/schema.js';
 
 const el = (tag, props = {}, ...children) => {
   const e = document.createElement(tag);
@@ -60,8 +60,9 @@ export class Rack {
     r.name.addEventListener('change', () => this.actions.setChannel(c.id, { name: r.name.value }));
     r.name.addEventListener('focus', () => this.actions.focusChannel(c.id));
     r.inst = el('select', { class: 'inst', 'aria-label': 'Instrument' });
-    for (const [id, info] of Object.entries(INSTRUMENTS)) r.inst.append(el('option', { value: id }, info.label));
     r.inst.addEventListener('change', () => this.actions.setChannel(c.id, { inst: r.inst.value }));
+    r.fx = el('button', { class: 'mini fxbtn', title: 'Sound, plugin and effects', onclick: () => this.actions.openChannel(c.id) }, 'FX');
+    r.status = el('span', { class: 'chip' });
     r.vol = el('input', { type: 'range', min: '0', max: '1', step: '0.01', class: 'vol', title: 'Volume', 'aria-label': 'Volume' });
     r.vol.addEventListener('input', () => this.actions.setChannel(c.id, { vol: +r.vol.value }));
     r.pan = el('input', { type: 'range', min: '-1', max: '1', step: '0.05', class: 'pan', title: 'Pan', 'aria-label': 'Pan' });
@@ -75,14 +76,14 @@ export class Rack {
     r.row = el(
       'div',
       { class: 'row', dataset: { id: c.id } },
-      el('div', { class: 'ctrl' }, el('span', { class: 'color' }), r.mute, r.solo, el('div', { class: 'namebox' }, r.name, r.inst), r.vol, r.pan),
-      el('div', { class: 'lane' }, r.steps, r.mini, r.badge),
+      el('div', { class: 'ctrl' }, el('span', { class: 'color' }), r.mute, r.solo, el('div', { class: 'namebox' }, r.name, r.inst), r.vol, r.pan, r.fx),
+      el('div', { class: 'lane' }, r.steps, r.mini, r.badge, r.status),
       r.del,
     );
     return r;
   }
 
-  render(project, pattern, { solo, selectedChannel, remote }) {
+  render(project, pattern, { solo, selectedChannel, remote, status }) {
     const ids = new Set(project.channels.map((c) => c.id));
     for (const [id, r] of this.rows) {
       if (!ids.has(id)) {
@@ -98,12 +99,12 @@ export class Rack {
         this.rows.set(c.id, r);
       }
       if (this.root.children[i] !== r.row) this.root.insertBefore(r.row, this.root.children[i] ?? null);
-      this.patchRow(r, c, pattern, length, { solo, selectedChannel, remote });
+      this.patchRow(r, c, pattern, length, { solo, selectedChannel, remote, status });
     });
     this.nowStep = -1;
   }
 
-  patchRow(r, c, pattern, length, { solo, selectedChannel, remote }) {
+  patchRow(r, c, pattern, length, { solo, selectedChannel, remote, status }) {
     r.data = c;
     const synth = isSynth(c.inst);
     r.row.style.setProperty('--ch', c.color);
@@ -116,7 +117,26 @@ export class Rack {
       if (document.activeElement !== input && String(input.value) !== String(value)) input.value = value;
     };
     set(r.name, c.name);
+
+    // Instrument choices: built-ins, plus sample/plugin modes when the
+    // channel has a sample or plugin attached.
+    const choices = [...BUILT_IN, ...(c.sample ? ['sample', 'samplekeys'] : []), ...(c.plugin ? ['wam'] : [])];
+    const key = choices.join() + (c.plugin?.name ?? '');
+    if (r.instKey !== key) {
+      r.inst.replaceChildren(
+        ...choices.map((id) => el('option', { value: id }, id === 'wam' ? `${c.plugin.name} (plugin)` : INSTRUMENTS[id].label)),
+      );
+      r.instKey = key;
+    }
     set(r.inst, c.inst);
+    r.fx.textContent = c.fx?.length ? `FX ${c.fx.length}` : 'FX';
+    r.fx.classList.toggle('on', !!c.fx?.length);
+    const st = status(c);
+    r.status.hidden = !st;
+    if (st) {
+      r.status.textContent = st.text;
+      r.status.className = `chip ${st.level}`;
+    }
     set(r.vol, c.vol);
     set(r.pan, c.pan);
 

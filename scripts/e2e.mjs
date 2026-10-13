@@ -2,7 +2,8 @@
 //   npm run build && npm run e2e     (set CHROMIUM_PATH if needed)
 // Screenshots land in e2e-shots/.
 
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
+import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { chromium } from 'playwright-core';
@@ -13,6 +14,39 @@ mkdirSync(SHOTS, { recursive: true });
 const dataDir = mkdtempSync(join(tmpdir(), 'coprod-e2e-'));
 const srv = await startServer({ port: 0, dataDir });
 const URL_ = `http://localhost:${srv.port}/?room=e2e-${Date.now()}`;
+
+// A second server on another origin, standing in for a third-party plugin site.
+const echoSrc = readFileSync(new URL('../public/wam/coprod-echo/index.js', import.meta.url));
+const foreign = createServer((req, res) => {
+  res.writeHead(200, { 'content-type': 'text/javascript', 'access-control-allow-origin': '*' });
+  res.end(echoSrc);
+});
+await new Promise((r) => foreign.listen(0, r));
+const FOREIGN_URL = `http://127.0.0.1:${foreign.address().port}/plugins/far-echo/index.js`;
+
+/** A short decaying sine "boom" as a WAV file. */
+function makeWav(path, freq) {
+  const rate = 22050;
+  const n = Math.floor(rate * 0.4);
+  const buf = Buffer.alloc(44 + n * 2);
+  buf.write('RIFF', 0);
+  buf.writeUInt32LE(36 + n * 2, 4);
+  buf.write('WAVEfmt ', 8);
+  buf.writeUInt32LE(16, 16);
+  buf.writeUInt16LE(1, 20);
+  buf.writeUInt16LE(1, 22);
+  buf.writeUInt32LE(rate, 24);
+  buf.writeUInt32LE(rate * 2, 28);
+  buf.writeUInt16LE(2, 32);
+  buf.writeUInt16LE(16, 34);
+  buf.write('data', 36);
+  buf.writeUInt32LE(n * 2, 40);
+  for (let i = 0; i < n; i++) buf.writeInt16LE(Math.round(Math.sin((2 * Math.PI * freq * i) / rate) * Math.exp(-i / (rate * 0.1)) * 30000), 44 + i * 2);
+  writeFileSync(path, buf);
+  return path;
+}
+const boom = makeWav(join(dataDir, 'boom.wav'), 55);
+const snap = makeWav(join(dataDir, 'snap.wav'), 900);
 
 const browser = await chromium.launch({
   executablePath: process.env.CHROMIUM_PATH || undefined,
@@ -106,6 +140,116 @@ try {
   await ben.screenshot({ path: `${SHOTS}2-ben-desktop.png` });
   await ana.click('#play');
 
+  // ---- Samples ----------------------------------------------------------
+  const chooser = ana.waitForEvent('filechooser');
+  await ana.selectOption('#addChannel', '__sample');
+  await (await chooser).setFiles(boom);
+  await ben.waitForFunction(() => [...document.querySelectorAll('.row .name')].some((i) => i.value === 'boom'));
+  const boomId = await ben.evaluate(() => window.coprod.ui.project.channels.find((c) => c.name === 'boom').id);
+  await ben.waitForFunction(
+    (id) => {
+      const c = window.coprod.ui.project.channels.find((x) => x.id === id);
+      return window.coprod.engine.sampleStatus(c.sample.id).status === 'ready';
+    },
+    boomId,
+  );
+  step("Ana uploads a sample; Ben's browser downloads and decodes the same file");
+
+  await ana.click(`.row[data-id="${boomId}"] .step[data-step="0"]`);
+  await ben.waitForSelector(`.row[data-id="${boomId}"] .step[data-step="0"].on`);
+  step('Sample channels sequence like any drum channel');
+
+  // Drag a file onto the Clap row to swap its sound.
+  const clapId = await ana.evaluate(() => window.coprod.ui.project.channels.find((c) => c.inst === 'clap').id);
+  const snapB64 = readFileSync(snap).toString('base64');
+  await ana.evaluate(
+    async ({ b64, id }) => {
+      const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+      const dt = new DataTransfer();
+      dt.items.add(new File([bytes], 'snap.wav', { type: 'audio/wav' }));
+      const row = document.querySelector(`.row[data-id="${id}"] .lane`);
+      for (const type of ['dragenter', 'dragover', 'drop']) row.dispatchEvent(new DragEvent(type, { bubbles: true, cancelable: true, dataTransfer: dt }));
+    },
+    { b64: snapB64, id: clapId },
+  );
+  await ben.waitForFunction((id) => window.coprod.ui.project.channels.find((c) => c.id === id).inst === 'sample', clapId);
+  step('Dropping an audio file on a channel replaces its sound for everyone');
+
+  // ---- Plugin instrument -------------------------------------------------
+  await ana.selectOption('#addChannel', '__plugin');
+  await ana.click('.picker-item:has-text("Acid")');
+  await ana.waitForSelector('#channelPanel .plugin-gui input[data-param="cutoff"]');
+  const acidId = await ana.evaluate(() => window.coprod.ui.project.channels.find((c) => c.inst === 'wam').id);
+  await ben.waitForFunction((id) => window.coprod.engine.slotStatus(id).status === 'ready', acidId);
+  step("Ana adds the Acid plugin; it loads in Ben's browser too");
+
+  // Ana turns a knob in the plugin's own GUI; Ben's copy follows.
+  await ana.evaluate(() => {
+    const knob = document.querySelector('#channelPanel input[data-param="cutoff"]');
+    knob.value = '0.9';
+    knob.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  await ben.waitForFunction((id) => window.coprod.engine.slots.get(id)?.node.params.cutoff === 0.9, acidId);
+  step("Turning a knob in Ana's plugin GUI changes Ben's plugin");
+
+  // Ben opens the same channel and sees the knob where Ana left it.
+  await ben.click(`.row[data-id="${acidId}"] .fxbtn`);
+  await ben.waitForFunction(() => document.querySelector('#channelPanel input[data-param="cutoff"]')?.value === '0.9');
+
+  // Ben adds the built-in Echo effect to that channel.
+  await ben.selectOption('#channelPanel .fx-add', '/wam/coprod-echo/index.js');
+  await ana.waitForFunction(
+    (id) => {
+      const c = window.coprod.ui.project.channels.find((x) => x.id === id);
+      return c.fx.length === 1 && window.coprod.engine.slotStatus(`${id}/${c.fx[0].id}`).status === 'ready' && window.coprod.engine.buses.get(id).chainKey === c.fx[0].id;
+    },
+    acidId,
+  );
+  step('Ben adds an Echo effect; it is inserted in the chain on both sides');
+
+  // Notes on the plugin channel play through it.
+  await ana.click('#rollClose');
+  await ana.evaluate((id) => {
+    const { doc, S, ui } = window.coprod;
+    S.addNote(doc, ui.project.patterns[0].id, { ch: id, p: 45, s: 0, l: 2 });
+    S.addNote(doc, ui.project.patterns[0].id, { ch: id, p: 57, s: 4, l: 1 });
+  }, acidId);
+  await ana.click('#play');
+  await ana.waitForFunction((id) => window.coprod.engine.slots.get(id).node.voices.size >= 2, acidId, { timeout: 4000 });
+  await ana.click('#play');
+  step('Playback drives the plugin with MIDI notes (both pitches played)');
+
+  // ---- A plugin from another website --------------------------------------
+  await ana.selectOption('#channelPanel .fx-add', '__url').catch(async () => {
+    await ana.click(`.row[data-id="${acidId}"] .fxbtn`);
+    await ana.selectOption('#channelPanel .fx-add', '__url');
+  });
+  await ana.click('#picker summary');
+  await ana.fill('#pickerUrl', FOREIGN_URL);
+  await ana.click('#pickerUrlAdd');
+  await ana.waitForFunction(
+    (id) => {
+      const c = window.coprod.ui.project.channels.find((x) => x.id === id);
+      return c.fx.length === 2 && window.coprod.engine.slotStatus(`${id}/${c.fx[1].id}`).status === 'ready';
+    },
+    acidId,
+  );
+  step('Ana adds a plugin from another site by URL (she chose it, so it loads for her)');
+
+  await ben.waitForSelector('#channelPanel .notice.warn');
+  const benFx = await ben.evaluate((id) => window.coprod.ui.project.channels.find((x) => x.id === id).fx[1].id, acidId);
+  const blocked = await ben.evaluate((key) => window.coprod.engine.slotStatus(key).status, `${acidId}/${benFx}`);
+  if (blocked !== 'blocked') throw new Error(`foreign plugin should be blocked for Ben, was ${blocked}`);
+  await ben.screenshot({ path: `${SHOTS}5-ben-plugin-blocked.png` });
+  step("Ben's browser does NOT run it until he allows that site");
+
+  await ben.click('#channelPanel .notice.warn button');
+  await ben.waitForFunction((key) => window.coprod.engine.slotStatus(key).status === 'ready', `${acidId}/${benFx}`);
+  step('After Ben allows the site, it loads for him too');
+  await ben.waitForTimeout(300);
+  await ben.screenshot({ path: `${SHOTS}6-ben-plugins.png` });
+  await ana.screenshot({ path: `${SHOTS}7-ana-rack.png`, fullPage: true });
+
   // A phone-sized third person.
   const cara = await join_('Cara', { width: 390, height: 844 });
   await cara.waitForFunction(() => document.querySelectorAll('#people .avatar').length === 3);
@@ -126,5 +270,6 @@ try {
 } finally {
   await browser.close();
   await srv.close();
+  foreign.close();
   rmSync(dataDir, { recursive: true, force: true });
 }

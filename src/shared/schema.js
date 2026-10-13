@@ -3,7 +3,11 @@
 //
 // Layout of the Y.Doc:
 //   meta      Y.Map    { version, title, bpm }
-//   channels  Y.Array  of Y.Map { id, name, inst, vol, pan, mute, color }
+//   channels  Y.Array  of Y.Map { id, name, inst, vol, pan, mute, color,
+//                                  sample?, plugin?, pluginState?, fx: Y.Map }
+//               sample:  { id: sha256 of the uploaded file, name }
+//               plugin:  { url, name } of a Web Audio Module instrument
+//               fx:      fxId -> { url, name, order, on, state }  (insert effects)
 //   patterns  Y.Array  of Y.Map { id, name, bars, steps: Y.Map, notes: Y.Map }
 //               steps: "channelId:stepIndex" -> velocity (missing = off)
 //               notes: noteId -> { ch, p, s, l, v }  (pitch, start step, length, velocity)
@@ -32,7 +36,38 @@ export const INSTRUMENTS = {
   pluck: { label: 'Pluck', kind: 'synth', root: 60 },
   keys: { label: 'Keys', kind: 'synth', root: 60 },
   pad: { label: 'Pad', kind: 'synth', root: 48 },
+  // Uploaded audio: one-shots on the step grid, or pitched in the piano roll.
+  sample: { label: 'Sample (steps)', kind: 'drum', needs: 'sample' },
+  samplekeys: { label: 'Sample (keys)', kind: 'synth', root: 60, needs: 'sample' },
+  // A Web Audio Module plugin instrument, played from the piano roll.
+  wam: { label: 'Plugin', kind: 'synth', root: 60, needs: 'plugin' },
 };
+
+/** Instruments that need nothing but the browser. */
+export const BUILT_IN = Object.keys(INSTRUMENTS).filter((k) => !INSTRUMENTS[k].needs);
+
+export const MAX_PLUGIN_STATE = 100_000; // bytes of JSON per plugin
+
+/** Plugin URLs must be same-origin paths or http(s) URLs. */
+export function cleanPluginUrl(url) {
+  const u = String(url ?? '').trim();
+  // Same-site path. "//x" and "/\x" would resolve to another website.
+  if (/^\/[^/\\]/.test(u)) return u;
+  try {
+    const parsed = new URL(u);
+    return parsed.protocol === 'https:' || parsed.protocol === 'http:' ? parsed.href : null;
+  } catch {
+    return null;
+  }
+}
+
+/** JSON-safe copy of a plugin state, or undefined if it's too big to share. */
+function cleanState(state) {
+  if (state === undefined || state === null) return undefined;
+  const json = JSON.stringify(state);
+  if (json === undefined || json.length > MAX_PLUGIN_STATE) return undefined;
+  return JSON.parse(json);
+}
 
 export const COLORS = ['#ff8a3d', '#ffd23f', '#5ce1a3', '#3ad5ff', '#8f7bff', '#ff5fa2', '#ff6b6b', '#b8f35d'];
 
@@ -59,7 +94,7 @@ const findPattern = (doc, id) => patterns(doc).toArray().find((p) => p.get('id')
 
 // ------------------------------------------------------------------ channels
 
-function makeChannel(inst, name, color) {
+function makeChannel(inst, name, color, extra = {}) {
   const c = new Y.Map();
   c.set('id', newId());
   c.set('name', name ?? INSTRUMENTS[inst]?.label ?? inst);
@@ -68,15 +103,86 @@ function makeChannel(inst, name, color) {
   c.set('pan', 0);
   c.set('mute', false);
   c.set('color', color);
+  c.set('fx', new Y.Map());
+  for (const [k, v] of Object.entries(extra)) if (v !== undefined) c.set(k, v);
   return c;
 }
 
+const nextColor = (doc) => COLORS[channels(doc).length % COLORS.length];
+
 export function addChannel(doc, inst) {
-  if (!INSTRUMENTS[inst]) throw new Error(`unknown instrument ${inst}`);
-  const color = COLORS[channels(doc).length % COLORS.length];
-  const c = makeChannel(inst, undefined, color);
+  if (!BUILT_IN.includes(inst)) throw new Error(`unknown instrument ${inst}`);
+  const c = makeChannel(inst, undefined, nextColor(doc));
   channels(doc).push([c]);
   return c.get('id');
+}
+
+const cleanSample = (s) => ({ id: String(s.id), name: String(s.name ?? 'Sample').slice(0, 64) });
+
+/** A channel playing an uploaded sample (`sample` = { id, name } from the server). */
+export function addSampleChannel(doc, sample, { keys = false } = {}) {
+  const smp = cleanSample(sample);
+  const name = smp.name.replace(/\.[a-z0-9]{2,4}$/i, '').slice(0, 32) || 'Sample';
+  const c = makeChannel(keys ? 'samplekeys' : 'sample', name, nextColor(doc), { sample: smp });
+  channels(doc).push([c]);
+  return c.get('id');
+}
+
+export function setChannelSample(doc, id, sample) {
+  const c = findChannel(doc, id);
+  if (!c) return;
+  doc.transact(() => {
+    c.set('sample', cleanSample(sample));
+    if (!INSTRUMENTS[c.get('inst')].needs) c.set('inst', 'sample');
+  });
+}
+
+/** A channel driven by a Web Audio Module instrument plugin. */
+export function addPluginChannel(doc, plugin) {
+  const url = cleanPluginUrl(plugin.url);
+  if (!url) throw new Error('bad plugin url');
+  const name = String(plugin.name ?? 'Plugin').slice(0, 32);
+  const c = makeChannel('wam', name, nextColor(doc), { plugin: { url, name } });
+  channels(doc).push([c]);
+  return c.get('id');
+}
+
+export function setPluginState(doc, channelId, state) {
+  const c = findChannel(doc, channelId);
+  const clean = cleanState(state);
+  if (c && clean !== undefined) c.set('pluginState', clean);
+}
+
+// ------------------------------------------------------------------ effects
+
+export function addEffect(doc, channelId, plugin) {
+  const c = findChannel(doc, channelId);
+  const url = cleanPluginUrl(plugin.url);
+  if (!c || !url) return null;
+  if (!c.get('fx')) c.set('fx', new Y.Map()); // channels from before effects existed
+  const fx = c.get('fx');
+  const order = Math.max(0, ...[...fx.values()].map((f) => f.order)) + 1;
+  const id = newId();
+  fx.set(id, { url, name: String(plugin.name ?? 'Effect').slice(0, 32), order, on: true });
+  return id;
+}
+
+export function setEffect(doc, channelId, fxId, patch) {
+  const fx = findChannel(doc, channelId)?.get('fx');
+  const cur = fx?.get(fxId);
+  if (!cur) return;
+  const next = { ...cur };
+  if ('on' in patch) next.on = !!patch.on;
+  if ('state' in patch) {
+    const clean = cleanState(patch.state);
+    if (clean === undefined) return;
+    next.state = clean;
+  }
+  fx.set(fxId, next);
+}
+
+export function removeEffect(doc, channelId, fxId) {
+  findChannel(doc, channelId)?.get('fx')?.delete(fxId);
 }
 
 export function setChannel(doc, id, patch) {
@@ -88,7 +194,11 @@ export function setChannel(doc, id, patch) {
       else if (k === 'pan') c.set(k, Math.min(1, Math.max(-1, +v)));
       else if (k === 'mute') c.set(k, !!v);
       else if (k === 'name') c.set(k, String(v).slice(0, 32));
-      else if (k === 'inst' && INSTRUMENTS[v]) c.set(k, v);
+      else if (k === 'inst' && INSTRUMENTS[v]) {
+        // Sample and plugin instruments only make sense with their data attached.
+        const needs = INSTRUMENTS[v].needs;
+        if (!needs || c.get(needs)) c.set(k, v);
+      }
     }
   });
 }
@@ -284,7 +394,15 @@ export function readProject(doc) {
   return {
     title: meta(doc).get('title') ?? 'Untitled',
     bpm: meta(doc).get('bpm') ?? 120,
-    channels: channels(doc).toArray().map((c) => c.toJSON()),
+    channels: channels(doc)
+      .toArray()
+      .map((c) => {
+        const json = c.toJSON();
+        const fx = Object.entries(json.fx ?? {})
+          .map(([id, f]) => ({ id, ...f }))
+          .sort((a, b) => a.order - b.order || (a.id < b.id ? -1 : 1));
+        return { ...json, fx };
+      }),
     patterns: patterns(doc)
       .toArray()
       .map((p) => ({
