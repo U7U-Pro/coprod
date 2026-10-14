@@ -535,6 +535,30 @@ input[type='range'] {
 .roll-inner {
   display: flex;
   width: max-content;
+  position: relative;
+}
+
+#rollLyrics + #rollClose {
+  margin-left: 0;
+}
+
+#rollLyrics.on {
+  border-color: var(--accent);
+  color: var(--text);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+
+.lyric-edit {
+  position: absolute;
+  z-index: 3;
+  height: 22px;
+  padding: 0 6px;
+  border: 1px solid var(--accent);
+  border-radius: 5px;
+  background: var(--bg);
+  color: var(--text);
+  font: 600 12px Inter, system-ui, sans-serif;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.45);
 }
 
 .roll .keys {

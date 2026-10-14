@@ -12,6 +12,7 @@ import initializeWamHost from '@webaudiomodules/sdk/src/initializeWamHost.js';
 export const CATALOG = [
   { url: '/wam/vertex/index.js', name: 'Vertex', type: 'instrument', about: 'Wavetable synth: unison, warp, mod matrix, 8 effects' },
   { url: '/wam/dexed/index.js', name: 'Dexed', type: 'instrument', about: 'DX7 FM synth (Dexed, GPL) with 1,000+ classic voices' },
+  { url: '/wam/vocalist/index.js', name: 'Vocalist', type: 'instrument', about: 'Singing synth: type lyrics, it sings them on your notes' },
   { url: '/wam/slicer/index.js', name: 'Slicer', type: 'instrument', about: 'Beat slicer: chop a loop at its hits, play slices from notes' },
   { url: '/wam/grains/index.js', name: 'Grains', type: 'instrument', about: 'Granular synth: turn any sound into pitched grain clouds' },
   { url: '/wam/coprod-acid/index.js', name: 'Acid', type: 'instrument', about: 'Squelchy synth with a resonant filter' },
@@ -125,6 +126,19 @@ export class PluginHost {
     if (!WAM?.createInstance) throw new Error('not a Web Audio Module');
     return WAM.createInstance(groupId, ctx, state ?? undefined);
   }
+}
+
+/**
+ * A note's lyric ({ ly, ph }) as the MIDI SysEx coprod sends just before its
+ * note-on: F0 7D 4C 59 <pitch> <ASCII text> F7 (7D: non-commercial ID, "LY").
+ * The text is the phonemes after a "/" when known ("/l ah v"), else the word.
+ * Plugins that don't sing ignore it.
+ */
+export function lyricEvent(lyric, pitch, time) {
+  const text = lyric?.ph ? `/${lyric.ph}` : lyric?.ly;
+  if (!text) return null;
+  const body = [...text.normalize('NFKD').replace(/[^\x20-\x7e]/g, '').slice(0, 120)].map((c) => c.charCodeAt(0));
+  return { type: 'wam-sysex', time, data: { bytes: [0xf0, 0x7d, 0x4c, 0x59, pitch & 0x7f, ...body, 0xf7] } };
 }
 
 /** Send events if the node understands WAM events (plain AudioNodes don't). */

@@ -630,6 +630,80 @@ try {
   step('Clicking the Grains waveform moves the grain position for Ben too');
   if ((await project(ana)).channels.length !== channelCount + 1) throw new Error('unexpected channel count');
 
+  // ---- Vocalist ----------------------------------------------------------
+  await ana.selectOption('#addChannel', '__plugin');
+  await ana.click('.picker-item:has-text("Vocalist")');
+  await ana.waitForSelector('#channelPanel .vo textarea');
+  const vocId = await ana.evaluate(() => window.coprod.ui.project.channels.find((c) => c.name === 'Vocalist').id);
+  await ben.waitForFunction((id) => window.coprod.engine.slotStatus(id).status === 'ready', vocId);
+  // A 4-note melody, then lyrics with more syllables than notes: notes get split.
+  await ana.evaluate((id) => {
+    const { doc, S, ui } = window.coprod;
+    const pid = ui.project.patterns[0].id;
+    [[0, 60], [4, 60], [8, 67], [12, 67]].forEach(([s, p]) => S.addNote(doc, pid, { ch: id, p, s, l: 4 }));
+  }, vocId);
+  await ana.fill('#channelPanel .vo textarea', 'Twin-kle twin-kle lit-tle star');
+  await ana.click('#channelPanel .vo button:has-text("Put lyrics on notes")');
+  const lyricsOf = (page) =>
+    page.evaluate((id) => window.coprod.ui.project.patterns[0].notes.filter((n) => n.ch === id).sort((a, b) => a.s - b.s).map((n) => n.ly).join(' '), vocId);
+  await ben.waitForFunction((id) => window.coprod.ui.project.patterns[0].notes.filter((n) => n.ch === id && n.ly).length === 7, vocId);
+  step(`Ana types lyrics into Vocalist: syllables land on the notes for Ben too ("${await lyricsOf(ben)}")`);
+
+  // Lyrics mode in the piano roll: click the first note, type, Tab to the next.
+  await ana.waitForSelector('#rollPanel:not([hidden]) #rollLyrics:not([hidden])');
+  await ana.click('#rollLyrics');
+  await ana.evaluate(() => {
+    const grid = document.querySelector('#roll canvas.grid');
+    const r = grid.getBoundingClientRect();
+    const cw = r.width / (window.coprod.ui.project.patterns[0].bars * 16);
+    const y = r.top + (96 - 60 + 0.5) * 16;
+    grid.dispatchEvent(new PointerEvent('pointerdown', { clientX: r.left + cw * 0.5, clientY: y, button: 0, bubbles: true, pointerId: 1 }));
+  });
+  await ana.waitForSelector('#roll .lyric-edit');
+  await ana.keyboard.press('Control+A');
+  await ana.keyboard.type('Shine');
+  await ana.keyboard.press('Tab');
+  await ana.keyboard.type('on you');
+  await ana.keyboard.press('Enter');
+  await ben.waitForFunction((id) => window.coprod.ui.project.patterns[0].notes.filter((n) => n.ch === id).sort((a, b) => a.s - b.s).slice(0, 3).map((n) => n.ly).join(' ') === 'Shine on you', vocId);
+  await (await ana.$('#rollPanel')).screenshot({ path: `${SHOTS}16-lyrics-roll.png` });
+  step('In the piano roll, typing on a note (Tab to the next, several words fill the next notes) reaches Ben');
+
+  // Playback sings: the plugin reports the phonemes it's on.
+  await ana.click('#play');
+  await ana.waitForFunction(
+    (id) => {
+      const st = window.coprod.engine.slots.get(id).node.status;
+      (window.__heard ??= new Set()).add(st?.ph);
+      return ['sh', 'ay', 'n', 'aa', 'y', 'uw'].every((p) => window.__heard.has(p));
+    },
+    vocId,
+    { timeout: 8000, polling: 15 },
+  );
+  await ana.click('#play');
+  step('Playback sings the lyrics: Ana hears sh-ay-n, aa-n, y-uw…');
+
+  // Export just the singer (solo is per person) and check the file isn't silent.
+  await ana.click(`.row[data-id="${vocId}"] .solo`);
+  await ana.click('#exportBtn');
+  await ana.selectOption('#exWhat', 'pattern');
+  await ana.selectOption('#exLoops', '1');
+  await ana.selectOption('#exTail', '0');
+  const vocDl = ana.waitForEvent('download', { timeout: 30000 });
+  await ana.click('#exGo');
+  const vocPath = `${dataDir}/vocal.wav`;
+  await (await vocDl).saveAs(vocPath);
+  await ana.click(`.row[data-id="${vocId}"] .solo`);
+  const vw = readFileSync(vocPath);
+  const vdv = new DataView(vw.buffer, vw.byteOffset, vw.byteLength);
+  const vn = vdv.getUint32(40, true) / 2;
+  let vsum = 0;
+  for (let i = 0; i < vn; i++) vsum += (vdv.getInt16(44 + i * 2, true) / 32768) ** 2;
+  const vocRms = Math.sqrt(vsum / vn);
+  if (!(vocRms > 0.01)) throw new Error(`vocal export is silent (rms ${vocRms})`);
+  await (await ana.$('#channelPanel')).screenshot({ path: `${SHOTS}17-vocalist.png` });
+  step(`The WAV export sings too (Vocalist solo, rms ${vocRms.toFixed(3)})`);
+
   // A phone-sized third person.
   const cara = await join_('Cara', { width: 390, height: 844 });
   await cara.waitForFunction(() => document.querySelectorAll('#people .avatar').length === 3);

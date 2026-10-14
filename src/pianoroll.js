@@ -1,6 +1,8 @@
 // Piano roll for one synth channel, drawn on canvas. Shows other synth
 // channels as faint "ghost" notes for harmony, and other people's cursors
-// when they are in the same roll.
+// when they are in the same roll. Notes can carry lyrics (for singing
+// plugins): they're drawn on the notes, and in lyrics mode (or with Alt)
+// clicking a note opens a text box for its syllable.
 
 import { MIN_PITCH, MAX_PITCH, STEPS_PER_BAR } from './shared/schema.js';
 
@@ -33,6 +35,8 @@ export class PianoRoll {
     this.hover = null;
     this.playStep = -1;
     this.dirty = true;
+    this.lyricMode = false;
+    this.editor = null; // { input, id }
 
     this.grid.addEventListener('pointerdown', (e) => this.down(e));
     this.grid.addEventListener('pointermove', (e) => this.move(e));
@@ -68,6 +72,7 @@ export class PianoRoll {
 
   open(channelId) {
     const first = this.channel !== channelId;
+    if (first) this.closeEditor(false);
     this.channel = channelId;
     this.dirty = true;
     if (first) this.pendingScroll = true; // after the next draw gives the canvas its height
@@ -96,6 +101,11 @@ export class PianoRoll {
     return { x: x / this.cellW, pitch: MAX_PITCH - Math.floor(y / ROW_H), px: x };
   }
 
+  /** This channel's notes in singing order: by time, highest first in a chord. */
+  ordered() {
+    return this.pattern.notes.filter((n) => n.ch === this.channel).sort((a, b) => a.s - b.s || b.p - a.p);
+  }
+
   hit({ x, pitch }) {
     return this.pattern.notes.find((n) => n.ch === this.channel && n.p === pitch && x >= n.s && x < n.s + n.l);
   }
@@ -107,12 +117,17 @@ export class PianoRoll {
     this.actions.beginGesture();
     const pos = this.at(e);
     const hit = this.hit(pos);
+    if (hit && (this.lyricMode || e.altKey)) {
+      this.openEditor(hit.id);
+      return;
+    }
+    this.closeEditor(true);
     if (hit) {
       const edge = (hit.s + hit.l) * this.cellW - pos.px < Math.min(10, this.cellW / 3);
       this.drag = edge
         ? { mode: 'resize', id: hit.id, s: hit.s, moved: false }
         : { mode: 'move', id: hit.id, offset: pos.x - hit.s, s: hit.s, p: hit.p, moved: false };
-      if (!edge) this.actions.preview(hit.p);
+      if (!edge) this.actions.preview(hit.p, hit);
     } else {
       const s = Math.floor(pos.x);
       const id = this.actions.addNote({ p: pos.pitch, s, l: Math.min(this.lastLen, this.length - s) });
@@ -138,7 +153,7 @@ export class PianoRoll {
       const s = Math.max(0, Math.round(pos.x - d.offset));
       const p = Math.max(MIN_PITCH, Math.min(MAX_PITCH, pos.pitch));
       if (s !== d.s || p !== d.p) {
-        if (p !== d.p) this.actions.preview(p);
+        if (p !== d.p) this.actions.preview(p, this.pattern.notes.find((n) => n.id === d.id));
         this.actions.updateNote(d.id, { s, p });
         d.s = s;
         d.p = p;
@@ -164,6 +179,83 @@ export class PianoRoll {
       const note = this.pattern.notes.find((n) => n.id === d.id);
       if (note) this.lastLen = note.l;
     }
+    this.dirty = true;
+  }
+
+  // ---------------------------------------------------------------- lyrics
+
+  setLyricMode(on) {
+    this.lyricMode = on;
+    if (!on) this.closeEditor(true);
+    this.dirty = true;
+  }
+
+  /** A text box over a note for typing its lyric. */
+  openEditor(id) {
+    this.closeEditor(true);
+    const n = this.pattern.notes.find((x) => x.id === id);
+    if (!n) return;
+    const input = document.createElement('input');
+    input.className = 'lyric-edit';
+    input.value = n.ly ?? '';
+    input.placeholder = 'lyric';
+    input.spellcheck = false;
+    input.maxLength = 120;
+    input.title = 'Enter: save · Tab / Shift+Tab: next / previous note · Esc: cancel. Several words or hyphenated syllables fill the following notes.';
+    Object.assign(input.style, {
+      left: `${KEYS_W + n.s * this.cellW}px`,
+      top: `${(MAX_PITCH - n.p) * ROW_H - 3}px`,
+      width: `${Math.max(70, n.l * this.cellW)}px`,
+    });
+    input.addEventListener('keydown', (e) => {
+      e.stopPropagation(); // keep Space/Esc/Ctrl+Z for the text box
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        this.closeEditor(true);
+      } else if (e.key === 'Escape') {
+        e.preventDefault();
+        this.closeEditor(false);
+      } else if (e.key === 'Tab') {
+        e.preventDefault();
+        const last = this.commit();
+        const list = this.ordered();
+        const at = list.findIndex((x) => x.id === (e.shiftKey ? id : last));
+        const next = list[at + (e.shiftKey ? -1 : 1)];
+        this.closeEditor(false);
+        if (next) this.openEditor(next.id);
+      }
+    });
+    input.addEventListener('blur', () => this.editor?.input === input && this.closeEditor(true));
+    this.grid.parentElement.append(input);
+    this.editor = { input, id };
+    input.focus();
+    input.select();
+  }
+
+  /** Save the editor's text; returns the id of the last note it filled. */
+  commit() {
+    const ed = this.editor;
+    if (!ed) return null;
+    const text = ed.input.value.trim();
+    const parts = text.split(/\s+/).flatMap((w) => (w === '-' ? [w] : w.split('-').filter(Boolean)));
+    if (parts.length <= 1) {
+      this.actions.setLyric(ed.id, text);
+      return ed.id;
+    }
+    // Several syllables: this note and the ones after it.
+    const list = this.ordered();
+    const from = list.findIndex((x) => x.id === ed.id);
+    const notes = list.slice(from, from + parts.length);
+    notes.forEach((n, i) => this.actions.setLyric(n.id, parts[i]));
+    return notes.at(-1)?.id ?? ed.id;
+  }
+
+  closeEditor(save) {
+    const ed = this.editor;
+    if (!ed) return;
+    if (save) this.commit();
+    this.editor = null;
+    ed.input.remove();
     this.dirty = true;
   }
 
@@ -261,7 +353,16 @@ export class PianoRoll {
       g.globalAlpha = 1;
       g.fillStyle = 'rgba(0,0,0,0.35)';
       g.fillRect(x + w - 4, y + 3, 2, ROW_H - 8); // resize grip
-      if (w > 34) {
+      if (n.ly) {
+        g.save();
+        g.beginPath();
+        g.rect(x + 2, y, w - 6, ROW_H - 2);
+        g.clip();
+        g.fillStyle = n.ly === '-' ? 'rgba(0,0,0,0.45)' : 'rgba(0,0,0,0.85)';
+        g.font = '700 10px Inter, system-ui, sans-serif';
+        g.fillText(n.ly === '-' ? '–' : n.ly, x + 4, y + 11);
+        g.restore();
+      } else if (w > 34) {
         g.fillStyle = 'rgba(0,0,0,0.7)';
         g.font = '600 9px Inter, system-ui, sans-serif';
         g.fillText(noteName(n.p), x + 4, y + 11);

@@ -68,6 +68,19 @@ npm start          # serves dist/ and the sync socket on $PORT (default 3000)
 
     Both store their audio in coprod's sample store, so everyone in the room (and
     the WAV export) uses the same file.
+  - **Vocalist**, a singing synthesizer. Type lyrics in its panel; **Put lyrics on
+    notes** splits them into syllables and gives each of the channel's notes one,
+    in time order. When there are more syllables than notes, it either splits
+    long notes or adds notes after the last one. Words are split automatically
+    (beau-ti-ful), or you can place hyphens yourself (to-mor-row). A lone `-`
+    holds the previous syllable over the next note, and `[n ow]` gives exact
+    phonemes. The piano roll shows each note's syllable; its **✎ Lyrics** mode
+    (or Alt+click) lets you retype one note, with Tab to the next note, and
+    several words fill the following notes. Voice knobs: Pitch, Formant,
+    Breathiness, Lightness, Tension, Opening, Vibrato (depth, rate, delay),
+    Glide, Scoop, Rough, Consonants, Attack, Release. There are presets from
+    Soprano to Growl, and everything can be automated. Consonants start just
+    before the beat so the vowel lands on it, the way singers do.
   - Small **Acid** synth and **Echo** delay examples.
 
   **Add channel → Plugins** opens one browser with every plugin: the bundled ones
@@ -136,8 +149,21 @@ browser ── edits (Yjs updates) ──► server/rooms.js ──► every oth
   `index.js` (the WAM and its shared state) and `gui.js`. They share
   `public/wam/kit/`: parameter tables, the worklet/event plumbing, sample
   upload/decoding, transient detection and the demo sounds.
+- `public/wam/vocalist/`: the singing synth. `engine.js` is a Klatt-style formant
+  synthesizer: an LF-model glottal pulse (`glottal.js`, band-limited with Vertex's
+  mipmaps) with breath noise, a nasal pole/zero, five formant resonators and a
+  frication branch, driven by per-phoneme targets (`phonemes.js`). `g2p.js` turns
+  words into phonemes: the dictionary in `lexicon.js`, then regular suffixes on
+  dictionary stems, then NRL-style letter-to-sound rules. `lyrics.js` splits them
+  into syllables (maximal onset) and defines the lyric wire format.
+- Notes can carry a lyric: `ly` (the syllable shown) and optionally `ph`
+  (ARPAbet phonemes). The engine sends it to plugin instruments as MIDI SysEx just
+  before the note-on: `F0 7D 4C 59 <note> <ASCII text> F7`, where the text is the
+  word, or `/` followed by the phonemes. Plugins that don't sing ignore it.
 - Plugin GUIs can hand notes to the channel with a bubbling `coprod:notes` DOM
-  event (`{ notes: [{ p, s, l }] }`); Slicer's "To piano roll" uses it.
+  event (`{ notes: [{ p, s, l }] }`); Slicer's "To piano roll" uses it. Likewise
+  `coprod:lyrics` (`{ syllables: [{ ly, ph }], fill }`) puts syllables on the
+  channel's notes (`assignLyrics` in the schema).
 - `src/automation.js`: the automation lane editor; lanes are scheduled in `audio.js`.
 - `src/export.js`, `src/wav.js`: offline rendering and WAV encoding.
 - `plugins/dexed/`: the Dexed port: Dexed's engine source (GPLv3), the small shims
@@ -191,6 +217,11 @@ worklets some plugins use on secure pages (localhost is fine for development).
   app; see the plan below.
 - Vertex is CPU-hungry at extremes (like any big wavetable synth): 8 voices with
   7-voice unison on both oscillators plus effects uses roughly a quarter of one core.
+- Vocalist is a formant synthesizer, not a recorded or neural voice. It is clearly
+  sung and intelligible, but it sounds synthetic, like a classic speech synth
+  that can sing. It sings English (the dictionary has about 900 words, and rules
+  cover the rest, so unusual words may need hyphens or `[phonemes]`), and one
+  note at a time: in a chord, the latest note wins.
 - Automation of the bundled Acid/Echo plugins is applied slightly ahead of time
   (they react when events are scheduled, up to ~0.1 s early); Vertex is sample-block
   accurate.

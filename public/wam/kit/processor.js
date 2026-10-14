@@ -1,9 +1,14 @@
-// The audio-thread side of a sample plugin: applies scheduled MIDI,
+// The audio-thread side of coprod's worklet plugins: applies scheduled MIDI,
 // automation and transport events at 32-sample resolution, then lets the
 // engine render. Engine-specific messages (sample data, slices) go to
 // engine.handle().
+//
+// An engine that needs to see notes ahead of time (Vocalist starts consonants
+// before the beat) defines enqueue(event): it then gets note on/off and lyric
+// events as soon as they arrive, with their times, and schedules them itself.
 
 const BLOCK = 32;
+const isNote = (ev) => ev.kind === 'lyric' || (ev.kind === 'midi' && (ev.bytes[0] & 0xe0) === 0x80);
 
 export function registerEngine(name, Engine) {
   class Processor extends AudioWorkletProcessor {
@@ -26,14 +31,19 @@ export function registerEngine(name, Engine) {
           e.setAutomation(m.i, null); // touching a knob takes it back from automation
           break;
         case 'events':
-          for (const ev of m.events) this.events.push(ev);
+          for (const ev of m.events) {
+            if (e.enqueue && isNote(ev)) e.enqueue(ev);
+            else this.events.push(ev);
+          }
           this.events.sort((a, b) => a.time - b.time);
           break;
         case 'clear':
           this.events.length = 0;
+          e.clear?.();
           break;
         case 'panic':
           this.events.length = 0;
+          e.clear?.();
           e.allOff();
           break;
         default:
@@ -67,7 +77,7 @@ export function registerEngine(name, Engine) {
       for (let off = 0; off < frames; off += BLOCK) {
         const until = currentTime + (off + BLOCK) / sampleRate;
         while (this.events.length && this.events[0].time < until) this.apply(this.events.shift());
-        this.engine.render(L, R, off, Math.min(BLOCK, frames - off));
+        this.engine.render(L, R, off, Math.min(BLOCK, frames - off), currentFrame + off);
       }
       // ~30 times a second, tell the GUI what's playing.
       if (currentTime >= this.statusAt) {

@@ -91,7 +91,8 @@
         <header>
           <span class="swatch" id="rollSwatch"></span>
           <h2 id="rollTitle">Piano roll</h2>
-          <span class="hint">Click to add · drag to move · drag the end to resize · click a note to delete</span>
+          <span class="hint" id="rollHint">Click to add · drag to move · drag the end to resize · click a note to delete</span>
+          <button id="rollLyrics" class="ghost" hidden aria-pressed="false" title="Lyrics mode: click a note to type its syllable (Alt+click works any time)">✎ Lyrics</button>
           <button id="rollClose" class="ghost" aria-label="Close piano roll">✕</button>
         </header>
         <div id="roll" class="roll"></div>

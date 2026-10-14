@@ -10,7 +10,7 @@
 
 import { instruments, setBend } from './instruments.js';
 import { STEPS_PER_BAR, INSTRUMENTS, laneValueAt, segmentAt, STEPPED_CURVES } from './shared/schema.js';
-import { PluginHost, isTrusted, sendEvents } from './plugins.js';
+import { PluginHost, isTrusted, sendEvents, lyricEvent } from './plugins.js';
 
 const LOOKAHEAD_S = 0.12;
 const TICK_MS = 25;
@@ -332,18 +332,21 @@ export class Engine {
       const slot = this.slots.get(c.id);
       if (slot?.status !== 'ready') return;
       const vel = Math.max(1, Math.min(127, Math.round(opts.vel * 127)));
+      const lyric = opts.lyric ? lyricEvent(opts.lyric, opts.pitch, t) : null;
       sendEvents(
         slot.node,
+        ...(lyric ? [lyric] : []),
         { type: 'wam-midi', time: t, data: { bytes: [0x90, opts.pitch, vel] } },
         { type: 'wam-midi', time: t + opts.dur, data: { bytes: [0x80, opts.pitch, 0] } },
       );
     }
   }
 
-  /** Play one note right now (clicking a key or placing a note). */
-  preview(channel, pitch = INSTRUMENTS[channel.inst]?.root ?? 60, dur = 0.3) {
+  /** Play one note right now (clicking a key or placing a note); `lyric` is a note's { ly, ph }. */
+  preview(channel, pitch = INSTRUMENTS[channel.inst]?.root ?? 60, dur = 0.3, lyric = null) {
     if (!this.ctx || this.ctx.state !== 'running') return;
-    this.voice(channel, this.ctx.currentTime + 0.005, { pitch, vel: 0.8, dur });
+    // A sung syllable needs a moment for its consonants before the beat.
+    this.voice(channel, this.ctx.currentTime + (lyric ? 0.1 : 0.005), { pitch, vel: 0.8, dur, lyric });
   }
 
   // ---------------------------------------------------------------- transport
@@ -428,7 +431,7 @@ export class Engine {
     }
     for (const n of pattern.byStep?.get(step) ?? []) {
       const c = this.project.channels.find((x) => x.id === n.ch);
-      if (c) this.voice(c, time, { pitch: n.p, vel: n.v / 127, dur: n.l * stepDur });
+      if (c) this.voice(c, time, { pitch: n.p, vel: n.v / 127, dur: n.l * stepDur, lyric: n.ly ? n : null });
     }
     this.scheduleAutomation(pattern, step, time, stepDur);
   }

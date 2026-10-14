@@ -312,3 +312,75 @@ test('automation curves: shapes, per-segment settings, moving keeps the curve', 
   assert.equal(S.segmentAt(pts(), 4), 0);
   assert.equal(S.segmentAt(pts(), 9), 1);
 });
+
+test('notes carry an optional lyric; phonemes only with valid ARPAbet', () => {
+  const doc = new Y.Doc();
+  S.seedProject(doc);
+  const pid = S.readProject(doc).patterns[0].id;
+  const ch = S.addPluginChannel(doc, { url: '/wam/vocalist/index.js', name: 'Vocalist' });
+  const id = S.addNote(doc, pid, { ch, p: 60, s: 0, l: 2, ly: '  hel\u0000lo  ', ph: 'HH  ah' });
+  const note = () => S.readProject(doc).patterns[0].notes.find((n) => n.id === id);
+  assert.equal(note().ly, 'hello');
+  assert.equal(note().ph, 'hh ah');
+  S.setLyric(doc, pid, id, 'x'.repeat(100), '<script>');
+  assert.equal(note().ly.length, 32);
+  assert.equal(note().ph, undefined);
+  S.updateNote(doc, pid, id, { s: 4 }); // moving keeps the lyric
+  assert.equal(note().ly.length, 32);
+  S.setLyric(doc, pid, id, '');
+  assert.equal(note().ly, undefined);
+});
+
+test('assignLyrics: one syllable per note in time order; splits long notes or adds notes', () => {
+  const [a, b] = peers();
+  const pid = S.readProject(a).patterns[0].id;
+  const ch = S.addPluginChannel(a, { url: '/wam/vocalist/index.js', name: 'Vocalist' });
+  const mine = (doc) => S.readProject(doc).patterns[0].notes.filter((n) => n.ch === ch).sort((x, y) => x.s - y.s);
+  // Two half-bar notes, four syllables: each note is cut in two.
+  S.addNote(a, pid, { ch, p: 64, s: 8, l: 8 });
+  S.addNote(a, pid, { ch, p: 60, s: 0, l: 8 });
+  const syl = ['twin', 'kle', 'lit', 'tle'].map((ly, i) => ({ ly, ph: ['t w ih ng', 'k ah l', 'l ih', 't ah l'][i] }));
+  let r = S.assignLyrics(a, pid, ch, syl);
+  assert.deepEqual(r, { assigned: 4, split: 2, added: 0, dropped: 0, cleared: 0 });
+  assert.deepEqual(mine(a).map((n) => [n.s, n.l, n.p, n.ly, n.ph]), [
+    [0, 4, 60, 'twin', 't w ih ng'],
+    [4, 4, 60, 'kle', 'k ah l'],
+    [8, 4, 64, 'lit', 'l ih'],
+    [12, 4, 64, 'tle', 't ah l'],
+  ]);
+  sync(a, b);
+  assert.deepEqual(mine(b).map((n) => n.ly), ['twin', 'kle', 'lit', 'tle']);
+
+  // Fewer syllables: the extra notes lose their lyric.
+  r = S.assignLyrics(a, pid, ch, [{ ly: 'oh' }, { ly: '-' }]);
+  assert.equal(r.cleared, 2);
+  assert.deepEqual(mine(a).map((n) => n.ly ?? null), ['oh', '-', null, null]);
+
+  // "add" mode: new 2-step notes after the last one, growing the pattern.
+  const many = Array.from({ length: 12 }, (_, i) => ({ ly: `s${i}` }));
+  r = S.assignLyrics(a, pid, ch, many, { fill: 'add' });
+  assert.equal(r.added, 8);
+  assert.equal(S.readProject(a).patterns[0].bars, 2);
+  assert.deepEqual(mine(a).slice(4).map((n) => [n.s, n.l, n.p]), [16, 18, 20, 22, 24, 26, 28, 30].map((s) => [s, 2, 64]));
+
+  // A channel with no notes gets new ones from the start; patterns stop at 4 bars.
+  const ch2 = S.addPluginChannel(a, { url: '/wam/vocalist/index.js', name: 'Vocalist 2' });
+  r = S.assignLyrics(a, pid, ch2, Array.from({ length: 40 }, () => ({ ly: 'la' })));
+  assert.equal(S.readProject(a).patterns[0].bars, 4);
+  assert.deepEqual([r.added, r.dropped], [32, 8]);
+});
+
+test('assignLyrics: chords sing the top note first; split respects one step per syllable', () => {
+  const doc = new Y.Doc();
+  S.seedProject(doc);
+  const pid = S.readProject(doc).patterns[0].id;
+  const ch = S.addPluginChannel(doc, { url: '/wam/vocalist/index.js', name: 'V' });
+  S.addNote(doc, pid, { ch, p: 60, s: 0, l: 1 });
+  S.addNote(doc, pid, { ch, p: 67, s: 0, l: 1 });
+  S.addNote(doc, pid, { ch, p: 62, s: 1, l: 3 });
+  const r = S.assignLyrics(doc, pid, ch, ['a', 'b', 'c', 'd', 'e', 'f'].map((ly) => ({ ly })));
+  const notes = S.readProject(doc).patterns[0].notes.filter((n) => n.ch === ch).sort((x, y) => x.s - y.s || y.p - x.p);
+  assert.deepEqual(notes.map((n) => `${n.s}:${n.p}:${n.ly}`), ['0:67:a', '0:60:b', '1:62:c', '2:62:d', '3:62:e', '4:62:f']);
+  assert.equal(r.split, 1); // the 3-step note became three 1-step notes
+  assert.equal(r.added, 1); // the last syllable needed a new note
+});

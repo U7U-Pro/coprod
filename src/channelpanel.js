@@ -44,6 +44,12 @@ export class ChannelPanel {
       e.preventDefault();
       this.actions.setNotes(this.channelId, e.detail.notes);
     });
+    // ...or lyrics, one syllable per note (Vocalist's "Put lyrics on notes").
+    root.addEventListener('coprod:lyrics', (e) => {
+      if (!this.channelId || !Array.isArray(e.detail?.syllables)) return;
+      e.preventDefault();
+      e.detail.result = this.actions.setLyrics(this.channelId, e.detail.syllables, { fill: e.detail.fill });
+    });
     this.pending = new Map();
     // Some GUIs change state without DOM events (canvas knobs, pointer capture).
     // Not while playing: then automation is moving knobs, and those values

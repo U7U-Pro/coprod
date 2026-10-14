@@ -1,6 +1,7 @@
-// Main-thread side of coprod's sample plugins: a WAM 2.0 audio node with
-// normalized parameters, host automation, and an audio file that every
-// collaborator loads from coprod's sample store (/samples/<sha256>).
+// Main-thread side of coprod's own worklet plugins: a WAM 2.0 audio node with
+// normalized parameters and host automation (ParamNode), optionally playing an
+// audio file that every collaborator loads from coprod's sample store
+// (SampleNode, /samples/<sha256>).
 
 const workletLoaded = new WeakMap(); // AudioContext -> Map(url -> Promise)
 const round = (v) => Math.round(v * 1e5) / 1e5;
@@ -55,27 +56,22 @@ export const isAudioFile = (f) => f && (f.type?.startsWith('audio/') || AUDIO_FI
 
 // ------------------------------------------------------------------ node
 
-export class SampleNode extends AudioWorkletNode {
+/** A WAM 2.0 audio node with normalized, automatable parameters. */
+export class ParamNode extends AudioWorkletNode {
   /**
    * @param module   the WAM module
    * @param name     registered processor name
    * @param table    { PARAMS, INDEX, DEFAULTS } from defineParams
-   * @param demo     (sampleRate) => { L, R, name } used when no file is loaded
    */
-  constructor(module, name, table, demo) {
+  constructor(module, name, table) {
     super(module.audioContext, name, { numberOfInputs: 0, numberOfOutputs: 1, outputChannelCount: [2] });
     this.module = module;
     this.table = table;
-    this.demo = demo;
     this.values = Float32Array.from(table.DEFAULTS);
     this.autoValues = new Map(); // id -> normalized value the host automated
     this.listeners = new Set();
     this.status = null;
     this.tempo = 120;
-    this.sample = null; // { id, name } or null for the demo sound
-    this.audio = null; // { L, R, sr, duration, name } as loaded
-    this.sampleError = null;
-    this.loadedKey = undefined;
     this.port.onmessage = ({ data }) => {
       if (data.type === 'status') {
         this.status = data;
@@ -123,57 +119,6 @@ export class SampleNode extends AudioWorkletNode {
     this.emit('param', id);
   }
 
-  // ---- the sound file
-
-  /** Load a sample reference (or null for the demo) and send it to the audio thread. */
-  async setSample(ref) {
-    ref = cleanSampleRef(ref);
-    const key = ref?.id ?? 'demo';
-    if (key === this.loadedKey) return false;
-    this.loadedKey = key;
-    this.sample = ref;
-    this.sampleError = null;
-    this.emit('loading');
-    const ctx = this.context;
-    let audio;
-    try {
-      if (ref) {
-        const buf = await decodeSample(ctx, ref.id);
-        audio = { L: buf.getChannelData(0), R: buf.getChannelData(buf.numberOfChannels > 1 ? 1 : 0), name: ref.name };
-      } else {
-        audio = this.demo(ctx.sampleRate);
-      }
-    } catch (err) {
-      if (this.loadedKey !== key) return false;
-      this.sampleError = err.message || String(err);
-      this.emit('sample');
-      return false;
-    }
-    if (this.loadedKey !== key) return false; // replaced meanwhile
-    this.audio = { ...audio, sr: ctx.sampleRate, duration: audio.L.length / ctx.sampleRate };
-    const L = audio.L.slice();
-    const R = audio.R === audio.L ? L : audio.R.slice();
-    this.port.postMessage({ type: 'buffer', L, R }, R === L ? [L.buffer] : [L.buffer, R.buffer]);
-    this.emit('sample');
-    return true;
-  }
-
-  /** Upload a file, then use it. Returns true when a new sound loaded. */
-  async loadFile(file) {
-    this.uploading = file.name;
-    this.emit('loading');
-    try {
-      const ref = await uploadSample(file);
-      return await this.setSample(ref);
-    } catch (err) {
-      this.sampleError = err.message || String(err);
-      this.emit('sample');
-      return false;
-    } finally {
-      this.uploading = null;
-    }
-  }
-
   // ---- WAM events
 
   scheduleEvents(...events) {
@@ -195,6 +140,9 @@ export class SampleNode extends AudioWorkletNode {
           this.autoValues.clear();
           this.emit('param');
         }
+      } else {
+        const own = this.translateEvent?.(e, time); // subclasses: other event types
+        if (own) out.push(own);
       }
     }
     if (out.length) this.port.postMessage({ type: 'events', events: out });
@@ -275,11 +223,73 @@ export class SampleNode extends AudioWorkletNode {
   }
 }
 
+/** A ParamNode that plays an audio file every collaborator loads from coprod's sample store. */
+export class SampleNode extends ParamNode {
+  /** @param demo  (sampleRate) => { L, R, name } used when no file is loaded */
+  constructor(module, name, table, demo) {
+    super(module, name, table);
+    this.demo = demo;
+    this.sample = null; // { id, name } or null for the demo sound
+    this.audio = null; // { L, R, sr, duration, name } as loaded
+    this.sampleError = null;
+    this.loadedKey = undefined;
+  }
+
+  /** Load a sample reference (or null for the demo) and send it to the audio thread. */
+  async setSample(ref) {
+    ref = cleanSampleRef(ref);
+    const key = ref?.id ?? 'demo';
+    if (key === this.loadedKey) return false;
+    this.loadedKey = key;
+    this.sample = ref;
+    this.sampleError = null;
+    this.emit('loading');
+    const ctx = this.context;
+    let audio;
+    try {
+      if (ref) {
+        const buf = await decodeSample(ctx, ref.id);
+        audio = { L: buf.getChannelData(0), R: buf.getChannelData(buf.numberOfChannels > 1 ? 1 : 0), name: ref.name };
+      } else {
+        audio = this.demo(ctx.sampleRate);
+      }
+    } catch (err) {
+      if (this.loadedKey !== key) return false;
+      this.sampleError = err.message || String(err);
+      this.emit('sample');
+      return false;
+    }
+    if (this.loadedKey !== key) return false; // replaced meanwhile
+    this.audio = { ...audio, sr: ctx.sampleRate, duration: audio.L.length / ctx.sampleRate };
+    const L = audio.L.slice();
+    const R = audio.R === audio.L ? L : audio.R.slice();
+    this.port.postMessage({ type: 'buffer', L, R }, R === L ? [L.buffer] : [L.buffer, R.buffer]);
+    this.emit('sample');
+    return true;
+  }
+
+  /** Upload a file, then use it. Returns true when a new sound loaded. */
+  async loadFile(file) {
+    this.uploading = file.name;
+    this.emit('loading');
+    try {
+      const ref = await uploadSample(file);
+      return await this.setSample(ref);
+    } catch (err) {
+      this.sampleError = err.message || String(err);
+      this.emit('sample');
+      return false;
+    } finally {
+      this.uploading = null;
+    }
+  }
+}
+
 /**
- * A WAM module class around a SampleNode subclass.
+ * A WAM module class around a ParamNode subclass.
  * @param descriptor  WAM descriptor
  * @param processor   URL of the AudioWorklet module (registers the processor)
- * @param Node        class (module) => SampleNode
+ * @param Node        class (module) => ParamNode
  * @param gui         () => import of a module exporting createGui(node)
  */
 export function sampleModule(descriptor, processor, Node, gui) {

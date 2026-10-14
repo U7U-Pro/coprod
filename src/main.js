@@ -125,9 +125,10 @@ const roll = new PianoRoll($('roll'), {
   addNote: (n) => S.addNote(doc, currentPattern().id, { ...n, ch: ui.rollChannel }),
   updateNote: (id, patch) => S.updateNote(doc, currentPattern().id, id, patch),
   removeNote: (id) => S.removeNote(doc, currentPattern().id, id),
-  preview: (pitch) => {
+  setLyric: (id, text) => S.setLyric(doc, currentPattern().id, id, text),
+  preview: (pitch, note) => {
     const c = channelById(ui.rollChannel);
-    if (c) engine.ensure().then(() => engine.preview(c, pitch, 0.25));
+    if (c) engine.ensure().then(() => engine.preview(c, pitch, note?.ly ? 0.4 : 0.25, note?.ly ? note : null));
   },
   cursor: throttle((pos) => publishPresence({ cursor: pos }), 50),
 });
@@ -164,6 +165,12 @@ const channelPanel = new ChannelPanel($('channelPanel'), engine, {
       for (const n of notes) if (n.s < bars * S.STEPS_PER_BAR) S.addNote(doc, p.id, { ch, p: n.p, s: n.s, l: n.l, v: n.v ?? 100 });
     });
     openRoll(ch);
+  },
+  setLyrics: (ch, syllables, opts) => {
+    undo.stopCapturing();
+    const result = S.assignLyrics(doc, currentPattern().id, ch, syllables, opts);
+    openRoll(ch);
+    return result;
   },
   onClose: () => render(),
 });
@@ -462,6 +469,15 @@ function renderNow() {
     $('rollTitle').textContent = `${rollCh.name} · ${pattern.name}`;
     $('rollSwatch').style.background = rollCh.color;
     roll.set(p, pattern, remote);
+    // Lyrics editing, for plugins that sing (or notes that already have lyrics).
+    const sings = !!engine.slots.get(rollCh.id)?.descriptor?.lyrics || pattern.notes.some((n) => n.ch === rollCh.id && n.ly);
+    $('rollLyrics').hidden = !sings;
+    if (!sings && roll.lyricMode) roll.setLyricMode(false);
+    $('rollLyrics').classList.toggle('on', roll.lyricMode);
+    $('rollLyrics').setAttribute('aria-pressed', roll.lyricMode);
+    $('rollHint').textContent = roll.lyricMode
+      ? 'Click a note to type its lyric · Tab: next note · several words fill the next notes'
+      : 'Click to add · drag to move · drag the end to resize · click a note to delete';
   }
 
   // Song strip
@@ -561,6 +577,10 @@ $('deletePattern').onclick = () => {
 $('bars').onchange = (e) => S.setPattern(doc, ui.patternId, { bars: +e.target.value });
 $('songAdd').onclick = () => S.songAppend(doc, ui.patternId);
 $('rollClose').onclick = closeRoll;
+$('rollLyrics').onclick = () => {
+  roll.setLyricMode(!roll.lyricMode);
+  render();
+};
 
 for (const id of S.BUILT_IN) {
   const o = document.createElement('option');

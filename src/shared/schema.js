@@ -287,15 +287,42 @@ export function toggleStep(doc, patternId, channelId, step) {
 
 // ------------------------------------------------------------------ notes
 
+// A note can carry a lyric for singing plugins: `ly`, the syllable shown on the
+// note, and optionally `ph`, its phonemes (ARPAbet, e.g. "l ah v").
+const LYRIC_MAX = 32;
+const PHONEMES_RE = /^[a-z]{1,2}( [a-z]{1,2}){0,23}$/;
+
+export function cleanLyric(ly) {
+  return typeof ly === 'string'
+    ? ly
+        .normalize('NFC')
+        .replace(/[\u0000-\u001f\u007f]/g, '')
+        .trim()
+        .slice(0, LYRIC_MAX)
+    : '';
+}
+
+export function cleanPhonemes(ph) {
+  const s = typeof ph === 'string' ? ph.trim().toLowerCase().replace(/\s+/g, ' ') : '';
+  return PHONEMES_RE.test(s) ? s : '';
+}
+
 const cleanNote = (n, maxStep) => {
   const s = Math.max(0, Math.min(maxStep - 1, Math.round(n.s)));
-  return {
+  const out = {
     ch: String(n.ch),
     p: Math.max(MIN_PITCH, Math.min(MAX_PITCH, Math.round(n.p))),
     s,
     l: Math.max(1, Math.min(maxStep - s, Math.round(n.l ?? 1))),
     v: Math.max(1, Math.min(127, Math.round(n.v ?? 100))),
   };
+  const ly = cleanLyric(n.ly);
+  if (ly) {
+    out.ly = ly;
+    const ph = cleanPhonemes(n.ph);
+    if (ph) out.ph = ph;
+  }
+  return out;
 };
 
 export function addNote(doc, patternId, note) {
@@ -315,6 +342,91 @@ export function updateNote(doc, patternId, noteId, patch) {
 
 export function removeNote(doc, patternId, noteId) {
   findPattern(doc, patternId)?.get('notes').delete(noteId);
+}
+
+/** Set (or with '' clear) one note's lyric; phonemes are dropped unless given. */
+export function setLyric(doc, patternId, noteId, ly, ph = '') {
+  updateNote(doc, patternId, noteId, { ly, ph });
+}
+
+/**
+ * Put syllables ([{ ly, ph }]) on a channel's notes in a pattern, one per note
+ * in time order (highest note first in a chord). With more syllables than
+ * notes, `fill: 'split'` halves the longest notes, and either way notes are
+ * added after the last one (2 steps each) while the pattern has room (it
+ * grows up to 4 bars). Notes left over lose their lyric.
+ * Returns { assigned, split, added, dropped, cleared }.
+ */
+export function assignLyrics(doc, patternId, channelId, syllables, { fill = 'split' } = {}) {
+  const p = findPattern(doc, patternId);
+  const result = { assigned: 0, split: 0, added: 0, dropped: 0, cleared: 0 };
+  if (!p) return result;
+  const want = syllables.map((x) => ({ ly: cleanLyric(x.ly), ph: cleanPhonemes(x.ph) })).filter((x) => x.ly);
+  doc.transact(() => {
+    const notes = p.get('notes');
+    const mine = () =>
+      [...notes.entries()]
+        .filter(([, n]) => n.ch === channelId)
+        .map(([id, n]) => ({ id, ...n }))
+        .sort((a, b) => a.s - b.s || b.p - a.p);
+    let list = mine();
+    if (fill === 'split' && list.length && list.length < want.length) {
+      // Each note gets a share of the syllables in proportion to its length
+      // (at most one per step), then is cut into that many equal parts.
+      const total = list.reduce((a, n) => a + n.l, 0);
+      const ideal = list.map((n) => (n.l / total) * want.length);
+      const parts = list.map((n, i) => Math.max(1, Math.min(n.l, Math.floor(ideal[i]))));
+      for (let have = parts.reduce((a, b) => a + b, 0); have < want.length; have++) {
+        let best = -1;
+        list.forEach((n, i) => {
+          if (parts[i] < n.l && (best < 0 || ideal[i] - parts[i] > ideal[best] - parts[best])) best = i;
+        });
+        if (best < 0) break;
+        parts[best]++;
+      }
+      const max = p.get('bars') * STEPS_PER_BAR;
+      list.forEach((n, i) => {
+        if (parts[i] < 2) return;
+        const { id, ...rest } = n;
+        const base = Math.floor(n.l / parts[i]);
+        let s = n.s;
+        for (let k = 0; k < parts[i]; k++) {
+          const l = base + (k < n.l % parts[i] ? 1 : 0);
+          notes.set(k === 0 ? id : newId(), cleanNote({ ...rest, s, l }, max));
+          s += l;
+        }
+        result.split++;
+      });
+      list = mine();
+    }
+    if (list.length < want.length) {
+      const last = list.reduce((a, n) => (n.s + n.l > a.s + a.l ? n : a), list[0] ?? { s: 0, l: 0, p: 60 });
+      let s = last.s + last.l;
+      const need = s + 2 * (want.length - list.length);
+      const bars = [1, 2, 4].find((b) => b * STEPS_PER_BAR >= need) ?? 4;
+      if (bars > p.get('bars')) setPattern(doc, patternId, { bars });
+      const max = p.get('bars') * STEPS_PER_BAR;
+      while (list.length + result.added < want.length && s + 1 <= max) {
+        notes.set(newId(), cleanNote({ ch: channelId, p: last.p, s, l: Math.min(2, max - s), v: 100 }, max));
+        result.added++;
+        s += 2;
+      }
+      list = mine();
+    }
+    const max = p.get('bars') * STEPS_PER_BAR;
+    list.forEach((n, i) => {
+      const { ly: _ly, ph: _ph, id, ...rest } = n;
+      if (i < want.length) {
+        notes.set(id, cleanNote({ ...rest, ...want[i] }, max));
+        result.assigned++;
+      } else if (_ly) {
+        notes.set(id, cleanNote(rest, max));
+        result.cleared++;
+      }
+    });
+    result.dropped = Math.max(0, want.length - result.assigned);
+  });
+  return result;
 }
 
 // ------------------------------------------------------------------ patterns
