@@ -38,12 +38,8 @@
       <div id="patternTabs" class="tabs"></div>
       <button id="addPattern" class="ghost">+ Pattern</button>
       <div class="pattern-tools">
-        <label>Length
-          <select id="bars">
-            <option value="1">1 bar</option>
-            <option value="2">2 bars</option>
-            <option value="4">4 bars</option>
-          </select>
+        <label>Bars
+          <input id="bars" type="number" min="1" max="64" inputmode="numeric" title="Pattern length in bars (writing past the end also adds bars)" />
         </label>
         <button id="clonePattern" class="ghost">Clone</button>
         <button id="deletePattern" class="ghost danger">Delete</button>
@@ -58,6 +54,9 @@
             <option value="">+ Add channel…</option>
           </select>
           <span class="hint">Drums: click or drag across steps. Synths: click the row for its piano roll. Drop audio files anywhere to add samples.</span>
+          <label class="hide-unused" title="Only for you: hide channels with nothing in this pattern">
+            <input id="hideUnused" type="checkbox" /> Hide unused
+          </label>
         </div>
       </section>
 
@@ -92,6 +91,7 @@
           <span class="swatch" id="rollSwatch"></span>
           <h2 id="rollTitle">Piano roll</h2>
           <span class="hint" id="rollHint">Click to add · drag to move · drag the end to resize · click a note to delete</span>
+          <button id="rollSlide" class="ghost" aria-pressed="false" title="Slide mode: draw each note's pitch over its length (Shift: straight line, Alt: fine; right-click removes)">〰 Slide</button>
           <button id="rollLyrics" class="ghost" hidden aria-pressed="false" title="Lyrics mode: click a note to type its syllable (Alt+click works any time)">✎ Lyrics</button>
           <button id="rollClose" class="ghost" aria-label="Close piano roll">✕</button>
         </header>
@@ -99,11 +99,12 @@
       </section>
 
       <section class="song">
-        <h3>Song <span class="hint">patterns play left to right in Song mode</span></h3>
-        <div class="song-row">
-          <div id="songStrip" class="song-strip"></div>
-          <button id="songAdd" class="ghost">+ Add current pattern</button>
-        </div>
+        <h3>
+          Arrangement
+          <span class="hint">Song mode plays this. Click to place the current pattern · drag to move · drag its end to stretch (it loops) · right-click to delete · click a clip to edit its pattern · Ctrl+drag to select · click the ruler to play from there</span>
+          <button id="songAdd" class="ghost">+ Current pattern at the end</button>
+        </h3>
+        <div id="playlist" class="playlist"></div>
       </section>
     </main>
 

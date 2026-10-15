@@ -70,9 +70,15 @@ export class SlicerEngine extends ParamEngine {
       choked: false,
       held: true,
       played: 0,
+      slide: 0, // semitones, from the note's pitch slide
       age: ++this.age,
     });
     v.f.fill(0);
+  }
+
+  /** A note's pitch slide (cents) for the voices playing it. */
+  notePitch(note, cents) {
+    for (const v of this.voices) if (v.active && v.note === note && !v.choked) v.slide = cents / 100;
   }
 
   noteOff(note) {
@@ -116,7 +122,7 @@ export class SlicerEngine extends ParamEngine {
 
     for (const v of this.voices) {
       if (!v.active) continue;
-      const step = base * 2 ** (v.pitch / 12) * (v.rev ? -1 : 1);
+      const step = base * 2 ** ((v.pitch + v.slide) / 12) * (v.rev ? -1 : 1);
       const f = v.f;
       for (let i = 0; i < frames; i++) {
         if (v.choked) {

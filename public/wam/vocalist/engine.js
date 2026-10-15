@@ -62,6 +62,17 @@ export class VocalEngine extends ParamEngine {
       if (this.lyrics.length > 64) this.lyrics.shift();
       return;
     }
+    if (ev.kind === 'npitch') {
+      // A point of the note's pitch slide: kept with the note, read while singing it.
+      for (let i = this.notes.length - 1; i >= 0; i--) {
+        const n = this.notes[i];
+        if (n.pitch === ev.note && n.start <= at) {
+          (n.slide ??= []).push([at, ev.cents / 100]);
+          break;
+        }
+      }
+      return;
+    }
     const [status, a, b] = ev.bytes;
     if ((status & 0xf0) === 0x90 && b > 0) this.noteOn(a, b, at);
     else this.noteOff(a, at);
@@ -270,7 +281,10 @@ export class VocalEngine extends ParamEngine {
     // Natural drift: a slow random wander, more of it when rough.
     this.driftV = this.driftV * 0.97 + (this.rand() * 2 - 1) * 0.3;
     this.drift = this.drift * 0.995 + this.driftV * 0.02 * (0.3 + p.rough);
-    const f0 = 440 * 2 ** ((this.semis + (vib + this.drift * 6) / 100 - 69) / 12);
+    // The note's own pitch slide: the latest point reached (they come every ~10 ms).
+    let slide = 0;
+    if (sung?.slide) for (const [at, st] of sung.slide) if (at <= frame) slide = st;
+    const f0 = 440 * 2 ** ((this.semis + slide + (vib + this.drift * 6) / 100 - 69) / 12);
 
     // ---- voice quality
     const vel = this.vel ?? 0.8;

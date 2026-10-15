@@ -30,7 +30,8 @@ const DESCRIPTOR = {
   hasMpeOutput: false,
   hasOscInput: false,
   hasOscOutput: false,
-  hasSysexInput: false,
+  hasSysexInput: true,
+  notePitch: true, // coprod: per-note pitch slides via SysEx F0 7D 4E 50 note msb lsb F7
   hasSysexOutput: false,
 };
 
@@ -182,6 +183,11 @@ export class VertexNode extends AudioWorkletNode {
     for (const e of events) {
       const time = e.time ?? 0;
       if (e.type === 'wam-midi') out.push({ kind: 'midi', time, bytes: e.data.bytes });
+      else if (e.type === 'wam-sysex') {
+        const b = e.data?.bytes;
+        // coprod's per-note pitch: F0 7D 4E 50 note msb lsb F7 (cents + 8192)
+        if (b?.[0] === 0xf0 && b[1] === 0x7d && b[2] === 0x4e && b[3] === 0x50) out.push({ kind: 'npitch', time, note: b[4], cents: ((b[5] << 7) | b[6]) - 8192 });
+      }
       else if (e.type === 'wam-automation') {
         const i = I[e.data.id];
         if (i === undefined) continue;

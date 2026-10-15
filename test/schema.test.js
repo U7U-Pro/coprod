@@ -30,7 +30,7 @@ test('seeding creates a playable starter project exactly once', () => {
   const p = S.readProject(doc);
   assert.equal(p.channels.length, 6);
   assert.equal(p.patterns.length, 1);
-  assert.deepEqual(p.song, [p.patterns[0].id]);
+  assert.deepEqual(p.clips.map((c) => [c.p, c.t, c.s]), [[p.patterns[0].id, 0, 0]]);
   assert.ok(p.patterns[0].steps.size > 0);
   assert.ok(p.patterns[0].notes.length > 0);
 });
@@ -82,14 +82,56 @@ test('concurrent note edits: last writer wins per note, no duplicates', () => {
   assert.equal(notes.length, 1);
 });
 
-test('notes are clamped to the pattern and pitch range', () => {
+test('notes past the end make the pattern longer (by whole bars); pitch is clamped', () => {
   const doc = new Y.Doc();
   S.seedProject(doc);
   const pid = S.readProject(doc).patterns[0].id;
   const nid = S.addNote(doc, pid, { ch: 'x', p: 500, s: 14, l: 10 });
-  const n = S.readProject(doc).patterns[0].notes.find((x) => x.id === nid);
+  let p = S.readProject(doc).patterns[0];
+  const n = p.notes.find((x) => x.id === nid);
   assert.equal(n.p, S.MAX_PITCH);
-  assert.equal(n.s + n.l, 16);
+  assert.equal(n.l, 10);
+  assert.equal(p.bars, 2);
+  S.updateNote(doc, pid, nid, { s: 40 }); // moving it further grows it again
+  assert.equal(S.readProject(doc).patterns[0].bars, 4);
+  // ...but never past the limit.
+  S.addNote(doc, pid, { ch: 'x', p: 60, s: 5000, l: 4 });
+  p = S.readProject(doc).patterns[0];
+  assert.equal(p.bars, S.MAX_BARS);
+  assert.ok(p.notes.every((x) => x.s + x.l <= S.MAX_BARS * 16));
+});
+
+test('notes keep fine positions (1/24 step) and an optional pitch slide', () => {
+  const doc = new Y.Doc();
+  S.seedProject(doc);
+  const pid = S.readProject(doc).patterns[0].id;
+  const nid = S.addNote(doc, pid, { ch: 'x', p: 60, s: 2.51, l: 0.01, pb: [[1.5, 3], [0, 0], [0.5, 99], ['x', 1]] });
+  const n = S.readProject(doc).patterns[0].notes.find((x) => x.id === nid);
+  assert.equal(n.s, Math.round(2.51 * 24) / 24);
+  assert.equal(n.l, 1 / 24); // the shortest note
+  assert.deepEqual(n.pb, [[0, 0], [0.5, S.SLIDE_RANGE], [1, 3]]);
+  assert.equal(S.slideAt(n.pb, 0.25), S.SLIDE_RANGE / 2);
+  assert.equal(S.slideAt(n.pb, 2), 3);
+  assert.equal(S.slideAt(undefined, 0.5), 0);
+  S.updateNote(doc, pid, nid, { pb: [[0, 0], [1, 0]] }); // a flat slide is no slide
+  assert.equal(S.readProject(doc).patterns[0].notes.find((x) => x.id === nid).pb, undefined);
+});
+
+test('batch note edits: add, move, delete several in one undo step', () => {
+  const doc = new Y.Doc();
+  S.seedProject(doc);
+  const pid = S.readProject(doc).patterns[0].id;
+  const undo = new Y.UndoManager(S.undoScope(doc), { captureTimeout: 0 });
+  const ids = S.addNotes(doc, pid, [0, 1, 2].map((i) => ({ ch: 'x', p: 60 + i, s: i, l: 1 })));
+  undo.stopCapturing();
+  S.updateNotes(doc, pid, ids.map((id, i) => ({ id, s: 20 + i, p: 70 + i })));
+  const moved = S.readProject(doc).patterns[0].notes.filter((n) => ids.includes(n.id));
+  assert.deepEqual(moved.map((n) => [n.s, n.p]).sort(), [[20, 70], [21, 71], [22, 72]]);
+  assert.equal(S.readProject(doc).patterns[0].bars, 2);
+  undo.undo();
+  assert.deepEqual(S.readProject(doc).patterns[0].notes.filter((n) => ids.includes(n.id)).map((n) => n.s).sort(), [0, 1, 2]);
+  S.removeNotes(doc, pid, ids);
+  assert.equal(S.readProject(doc).patterns[0].notes.filter((n) => ids.includes(n.id)).length, 0);
 });
 
 test('patterns: add, clone, shrink, remove (and the song follows)', () => {
@@ -103,17 +145,21 @@ test('patterns: add, clone, shrink, remove (and the song follows)', () => {
   assert.equal(p.patterns[1].steps.size, first.steps.size);
   assert.equal(p.patterns[1].notes.length, first.notes.length);
 
-  S.setPattern(doc, copy, { bars: 2 });
+  S.setPattern(doc, copy, { bars: 3 });
+  assert.equal(S.readProject(doc).patterns[1].bars, 3);
   S.addNote(doc, copy, { ch: 'x', p: 60, s: 20, l: 8 });
   S.setPattern(doc, copy, { bars: 1 });
   assert.ok(S.readProject(doc).patterns[1].notes.every((n) => n.s + n.l <= 16));
+  S.setPattern(doc, copy, { bars: 0 });
+  S.setPattern(doc, copy, { bars: 1.5 });
+  assert.equal(S.readProject(doc).patterns[1].bars, 1);
 
-  S.songAppend(doc, copy);
-  S.songAppend(doc, first.id);
-  assert.equal(S.readProject(doc).song.length, 3);
+  S.appendClip(doc, copy);
+  S.appendClip(doc, first.id);
+  assert.deepEqual(S.readProject(doc).clips.map((c) => c.s).sort((x, y) => x - y), [0, 16, 32]);
   S.removePattern(doc, copy);
   p = S.readProject(doc);
-  assert.deepEqual(p.song, [first.id, first.id]);
+  assert.deepEqual(p.clips.map((c) => c.p), [first.id, first.id]);
   assert.equal(S.removePattern(doc, first.id), false, 'the last pattern stays');
 });
 
@@ -363,11 +409,11 @@ test('assignLyrics: one syllable per note in time order; splits long notes or ad
   assert.equal(S.readProject(a).patterns[0].bars, 2);
   assert.deepEqual(mine(a).slice(4).map((n) => [n.s, n.l, n.p]), [16, 18, 20, 22, 24, 26, 28, 30].map((s) => [s, 2, 64]));
 
-  // A channel with no notes gets new ones from the start; patterns stop at 4 bars.
+  // A channel with no notes gets new ones from the start; the pattern grows to fit.
   const ch2 = S.addPluginChannel(a, { url: '/wam/vocalist/index.js', name: 'Vocalist 2' });
   r = S.assignLyrics(a, pid, ch2, Array.from({ length: 40 }, () => ({ ly: 'la' })));
-  assert.equal(S.readProject(a).patterns[0].bars, 4);
-  assert.deepEqual([r.added, r.dropped], [32, 8]);
+  assert.equal(S.readProject(a).patterns[0].bars, 5);
+  assert.deepEqual([r.added, r.dropped], [40, 0]);
 });
 
 test('assignLyrics: chords sing the top note first; split respects one step per syllable', () => {
@@ -383,4 +429,85 @@ test('assignLyrics: chords sing the top note first; split respects one step per 
   assert.deepEqual(notes.map((n) => `${n.s}:${n.p}:${n.ly}`), ['0:67:a', '0:60:b', '1:62:c', '2:62:d', '3:62:e', '4:62:f']);
   assert.equal(r.split, 1); // the 3-step note became three 1-step notes
   assert.equal(r.added, 1); // the last syllable needed a new note
+});
+
+test('arrangement: clips anywhere on any track, overlapping, with gaps; resizing loops the pattern', () => {
+  const [a, b] = peers();
+  const first = S.readProject(a).patterns[0];
+  const second = S.addPattern(a);
+  S.setPattern(a, second, { bars: 2 });
+  const [c1, c2] = S.addClips(a, [
+    { p: first.id, t: 1, s: 64 },
+    { p: second, t: 2, s: 64 },
+  ]);
+  let p = S.readProject(a);
+  assert.equal(S.songLength(p), 96);
+  // Both patterns play at once at step 70; nothing plays in the gap at 40.
+  assert.deepEqual(S.clipsAt(p, 70).map((x) => [x.pattern.id, x.step]).sort(), [[first.id, 6], [second, 6]].sort());
+  assert.deepEqual(S.clipsAt(p, 40), []);
+  // Stretching a 1-bar clip to 3 bars loops its pattern.
+  S.updateClips(a, [{ id: c1, l: 48 }]);
+  p = S.readProject(a);
+  assert.deepEqual(S.clipsAt(p, 64 + 40).map((x) => x.step), [8]);
+  assert.equal(S.songLength(p), 112);
+  S.updateClips(a, [{ id: c1, l: null, t: 99, s: -5 }]); // back to the pattern's length; clamped
+  const moved = S.readProject(a).clips.find((c) => c.id === c1);
+  assert.deepEqual([moved.t, moved.s, moved.l], [S.MAX_TRACKS - 1, 0, undefined]);
+  sync(a, b);
+  same(a, b);
+  S.removeClips(b, [c2]);
+  sync(a, b);
+  assert.equal(S.readProject(a).clips.some((c) => c.id === c2), false);
+});
+
+test('an old left-to-right song turns into clips once, even if two people edit at the same time', () => {
+  const [a, b] = peers();
+  // A room from before the arrangement: a song list and no clips.
+  const p0 = S.readProject(a).patterns[0].id;
+  const p1 = S.addPattern(a);
+  S.setPattern(a, p1, { bars: 2 });
+  a.transact(() => {
+    a.getMap('clips').clear();
+    a.getArray('song').push([p0, p1, p0]);
+  });
+  sync(a, b);
+  // Reading shows it as clips on the first track without writing anything.
+  assert.deepEqual(S.readProject(b).clips.map((c) => [c.id, c.s]), [['song0', 0], ['song1', 16], ['song2', 48]]);
+  // Both edit at once; the conversion doesn't duplicate anything. (B's move
+  // of song2 races A's conversion writing song2's old spot: one of the two
+  // wins, the same on both sides.)
+  S.addClip(a, { p: p1, t: 1, s: 0 });
+  S.updateClips(b, [{ id: 'song2', s: 64 }]);
+  sync(a, b);
+  same(a, b);
+  const clips = S.readProject(a).clips;
+  assert.equal(clips.length, 4);
+  assert.ok([48, 64].includes(clips.find((c) => c.id === 'song2').s));
+  assert.equal(a.getArray('song').length, 0);
+  // After that, edits don't race the conversion any more.
+  S.updateClips(b, [{ id: 'song2', s: 80 }]);
+  sync(a, b);
+  assert.equal(S.readProject(a).clips.find((c) => c.id === 'song2').s, 80);
+});
+
+test('automation points: move several, paste into another lane (replacing that span), delete', () => {
+  const doc = new Y.Doc();
+  S.seedProject(doc);
+  const p = S.readProject(doc);
+  const pid = p.patterns[0].id;
+  const ch = p.channels[0].id;
+  const vol = S.addLane(doc, pid, ch, 'vol', 'Volume');
+  const pan = S.addLane(doc, pid, ch, 'pan', 'Pan');
+  const ids = [0, 4, 8].map((s, i) => S.setPoint(doc, pid, vol, null, { s, v: i / 2 }));
+  S.setCurve(doc, pid, vol, ids[0], { c: 'stairs', t: 0.5 });
+  S.updatePoints(doc, pid, vol, [{ id: ids[1], s: 5, v: 0.25 }]);
+  S.setPoint(doc, pid, pan, null, { s: 6, v: 0.9 }); // inside the span we paste over
+  S.setPoint(doc, pid, pan, null, { s: 12, v: 0.1 }); // outside it
+  const lanes = () => S.readProject(doc).patterns[0].lanes;
+  const copied = lanes().find((l) => l.id === vol).points.map(({ s, v, c, t }) => ({ s, v, c, t }));
+  S.pastePoints(doc, pid, pan, copied);
+  const panPts = lanes().find((l) => l.id === pan).points;
+  assert.deepEqual(panPts.map((x) => [x.s, x.v, x.c]), [[0, 0, 'stairs'], [5, 0.25, 'single'], [8, 1, 'single'], [12, 0.1, 'single']]);
+  S.removePoints(doc, pid, vol, ids);
+  assert.equal(lanes().find((l) => l.id === vol).points.length, 0);
 });

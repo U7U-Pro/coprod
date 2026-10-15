@@ -12,7 +12,9 @@ collaboration hooks.
 
 Long-term direction the owner has expressed:
 - An Ableton-style workflow where you can draw pitch along each note's length
-  (per-note pitch curves). **This is the next feature** (see Next steps).
+  (per-note pitch curves). **Done** ("Slide" mode, see the editing round below).
+- FL Studio parity where it counts: free arrangement, selection and copy/paste,
+  fine note positions, any pattern length.
 - A plugin story close to VSTs: we bundle WAM 2.0 web plugins, plus Dexed
   ported to WASM and Vertex, our own Serum-like wavetable synth.
 
@@ -61,6 +63,21 @@ ode.exe` broke it. It now runs `node` and Vite's `bin/vite.js` directly, and ref
     - The in-app browser pane stops firing requestAnimationFrame when Claude's window is in the background, so coprod's UI doesn't update there. Use the e2e (headless) for UI checks.
     - The e2e serves `dist/`, so the page can't `import('/src/...')`. Drive the real UI instead (e.g. the Export dialog).
     - When editing files from a `node -e`/heredoc script, regex backslashes inside template literals get eaten (`/\s+/` turned into `/s+/`). Prefer the Edit tool for code containing backslashes.
+    - Big heredocs through the Bash tool sometimes fail with "unexpected EOF while looking for matching `'`". Write the script with the Write tool into the scratchpad and run `node script.cjs` instead.
+
+## Editing round: arrangement, selection, slides, fine notes, any length
+
+- **Arrangement (`clips` Y.Map):** `{ p, t, s, l? }` (pattern, track 0..31, start step, optional length; longer than the pattern loops it). Song mode schedules every clip under the playhead each step (`clipsAt`), and loops at `songLength`. Pattern mode is unchanged. `marks` are now `{ time, songStep, active: [{ patternId, step }] }`; the UI shows the playhead of the pattern you're viewing wherever it plays. Song mode no longer switches the viewed pattern.
+  - **Migration:** the old `song` Y.Array is shown as clips `song0..n` on track 0 without writing. The first arrangement edit converts it (deterministic ids, so concurrent converters don't duplicate) and empties `song`. If two people's first edits race, one move can lose to the conversion (tested and documented).
+  - **UI** in `src/playlist.js`: canvas, click to paint the current pattern, drag, edge-resize, right-click delete, click to edit a pattern, Ctrl+drag select, ruler sets "play from" (per user, `ui.songStart`), Ctrl+wheel zoom.
+- **Patterns:** any length 1..`MAX_BARS` (64). `addNotes`/`updateNotes` grow the pattern to fit (`growTo`), so writing in the roll's extra bar adds a bar. `setNotes` and `assignLyrics` also grow without the old 4-bar cap.
+- **Notes:** `s` and `l` are kept to 1/`TICKS` (1/24) of a step via `tick()`. The scheduler indexes notes by `floor(s)` and offsets their time within the step. Batch ops: `addNotes`, `updateNotes`, `removeNotes` (one transaction each, so one undo step). Points: `updatePoints`, `removePoints`, `pastePoints` (which replaces the target lane's points across the pasted span).
+- **Slides:** `pb: [[x 0..1, semitones ±SLIDE_RANGE]]`, linear between points and held at the ends (`slideAt`); flat slides are dropped by `cleanSlide`.
+  - Built-in instruments get detune ramps through `setSlide`/`play()` in `instruments.js`, and samples through `applySlide`.
+  - WAMs with `descriptor.notePitch` get SysEx `F0 7D 4E 50 note msb lsb F7` (cents + 8192) every 10 ms where the value changes: Vertex, Acid, and the kit plugins Slicer, Grains and Vocalist. Others get channel pitch bend assuming ±2 st.
+- **Editors:** a shared `src/clipboard.js` (kinds `notes`, `points`, `clips`). The piano roll, automation panel and playlist each have a `sel` Set and a `key(e)` method; main.js routes Delete, Ctrl+C/X/V/A/B and Esc to the editor last clicked (`ui.active`). The piano roll has modes `notes`, `lyrics` and `slide`, and Alt-drag gives fine move/resize (Alt+click without moving still opens the lyric editor).
+- **Pattern instruments (decision):** channels stay global, like FL's channel rack. A per-person **Hide unused** view hides channels with nothing in the current pattern; it has no shared state, so it can't desync.
+- **Tests:** schema +6 (growth, fine positions and slides, batch ops and undo, arrangement, song migration race, point paste). The e2e has 9 more steps: box select plus copy/paste across patterns, growing by writing past the end, an Alt fine move, drawing a slide, slide audio on built-in Keys (rendered offline in the page via `engine.constructor`) and on Vertex (exported WAV), two patterns at once plus a gap in Song mode, and automation copy/paste between lanes.
 
 ## 3. Files
 
@@ -215,7 +232,7 @@ in src/, server/ and Vertex.
 ## 6. Known limitations
 
 - **Automation timing:** Acid and Echo apply automation about 0.1 s early (event-based, not sample-accurate).
-- **Pitch bend:** the bend lane bends the **whole channel**, not individual notes.
+- **Pitch bend:** the bend lane bends the **whole channel**; per-note bends are slides (`pb`). Slides on Dexed and third-party plugins fall back to channel pitch bend assuming ±2 semitones.
 - **Plugin state:** states that aren't plain JSON won't sync. Each key is capped at 256 KB, and only the oversized key is dropped.
 - **Vertex presets:** user presets are per browser (localStorage).
 - **Uploads:** rate limited per IP, with no storage quota or garbage collection of unused samples.
@@ -224,13 +241,8 @@ in src/, server/ and Vertex.
 
 ## 7. Next steps (priority order)
 
-1. **Ableton-style per-note pitch curves.** The owner asked for this explicitly and deferred it ("we can tackle the slides later"). Draw the pitch of each note along its length in the piano roll.
-   - **Data:** add an optional `pb: [{x, v}]` per note (x from 0 to 1 along the note, v in semitones). Validate it in schema.js and give it the same CRDT treatment as lanes. Reuse `curveShape` for segments.
-   - **Audio for built-ins:** schedule per-voice `detune` automation.
-   - **Audio for WAMs:** per-note bend needs MPE (one channel per note), or else falls back to channel bend when notes don't overlap. Check what Vertex can support: it is our code, so it could accept per-note pitch directly via a custom event.
-   - **UI:** a pitch-edit mode in `src/pianoroll.js` that draws over the note.
-   - **Tests:** a schema test and an export-measured pitch test, like the bend lane test.
-2. **Deploy.** Use any Node host with persistent disk and websockets (Render or Fly). AudioWorklets require HTTPS. Set `PORT` and `COPROD_DATA`.
+1. **Automation clips in the arrangement** (song-level automation spanning patterns). Today automation lives in patterns; overlapping clips that automate the same knob fight (last scheduled wins).
+2. **Deploy.** (The owner has tested with friends through a Cloudflare quick tunnel: `npm run build && npm start`, then `cloudflared tunnel --url http://localhost:3000`.) Use any Node host with persistent disk and websockets (Render or Fly). AudioWorklets require HTTPS. Set `PORT` and `COPROD_DATA`.
 3. **Expose Dexed parameters** (`getParameterInfo`) so they can be automated.
 4. **More automation features:**
    - Record automation from knob moves.

@@ -84,7 +84,8 @@ export class Rack {
     return r;
   }
 
-  render(project, pattern, { solo, selectedChannel, remote, status }) {
+  /** `visible`: a Set of channel ids to show (others hidden, just for me), or null for all. */
+  render(project, pattern, { solo, selectedChannel, remote, status, visible = null }) {
     const ids = new Set(project.channels.map((c) => c.id));
     for (const [id, r] of this.rows) {
       if (!ids.has(id)) {
@@ -93,6 +94,8 @@ export class Rack {
       }
     }
     const length = pattern.bars * STEPS_PER_BAR;
+    // Synth previews line up with the step grid, however long the pattern is.
+    this.root.style.setProperty('--len', length);
     project.channels.forEach((c, i) => {
       let r = this.rows.get(c.id);
       if (!r) {
@@ -100,6 +103,7 @@ export class Rack {
         this.rows.set(c.id, r);
       }
       if (this.root.children[i] !== r.row) this.root.insertBefore(r.row, this.root.children[i] ?? null);
+      r.row.hidden = !!visible && !visible.has(c.id);
       this.patchRow(r, c, pattern, length, { solo, selectedChannel, remote, status });
     });
     this.nowStep = -1;

@@ -8,13 +8,34 @@
 //     -> bus.gain (volume/mute/solo) -> bus.autoGain (volume automation)
 //     -> [WAM effects...] -> bus.pan -> bus.autoPan (pan automation) -> master
 
-import { instruments, setBend } from './instruments.js';
-import { STEPS_PER_BAR, INSTRUMENTS, laneValueAt, segmentAt, STEPPED_CURVES } from './shared/schema.js';
-import { PluginHost, isTrusted, sendEvents, lyricEvent } from './plugins.js';
+import { instruments, setBend, setSlide, applySlide } from './instruments.js';
+import { STEPS_PER_BAR, INSTRUMENTS, laneValueAt, segmentAt, STEPPED_CURVES, slideAt, songLength, clipsAt } from './shared/schema.js';
+import { PluginHost, isTrusted, sendEvents, lyricEvent, notePitchEvent } from './plugins.js';
 
 const LOOKAHEAD_S = 0.12;
 const TICK_MS = 25;
+const SLIDE_DT = 0.01; // seconds between pitch updates sent to plugins during a slide
 const json = (v) => JSON.stringify(v ?? null);
+
+/** A note's slide as [[time, cents], ...] at its own points (for ramping AudioParams). */
+export function slideRamp(pb, t, dur) {
+  if (!pb?.length) return null;
+  const out = [[t, slideAt(pb, 0) * 100]];
+  for (const [x, v] of pb) if (x > 0) out.push([t + x * dur, v * 100]);
+  return out;
+}
+
+/** The same slide as discrete values every SLIDE_DT where it changes (for plugins). */
+export function slideSteps(pb, t, dur) {
+  if (!pb?.length) return [];
+  const out = [[t, Math.round(slideAt(pb, 0) * 100)]];
+  const n = Math.max(1, Math.ceil(dur / SLIDE_DT));
+  for (let i = 1; i <= n; i++) {
+    const c = Math.round(slideAt(pb, i / n) * 100);
+    if (c !== out.at(-1)[1]) out.push([t + (i * dur) / n, c]);
+  }
+  return out;
+}
 
 export class Engine {
   /** Pass `context` to render somewhere other than the speakers (WAV export). */
@@ -26,7 +47,7 @@ export class Engine {
     this.playing = false;
     this.mode = 'pattern';
     this.patternId = null; // pattern to loop in pattern mode
-    this.marks = []; // [{ time, patternId, step, songIndex }] for the playhead
+    this.marks = []; // [{ time, songStep, active: [{ patternId, step }] }] for the playheads
     this.host = new PluginHost();
     this.samples = new Map(); // sample id -> { status, buffer?, error? }
     this.slots = new Map(); // "ch" or "ch/fx" -> plugin slot
@@ -60,11 +81,14 @@ export class Engine {
   setProject(project) {
     const tempoChanged = this.project && this.project.bpm !== project.bpm;
     this.project = project;
+    project.patternsById = new Map(project.patterns.map((p) => [p.id, p]));
     for (const p of project.patterns) {
+      // Notes by the step they start in (they can start between steps).
       p.byStep = new Map();
       for (const n of p.notes) {
-        if (!p.byStep.has(n.s)) p.byStep.set(n.s, []);
-        p.byStep.get(n.s).push(n);
+        const k = Math.floor(n.s + 1e-9);
+        if (!p.byStep.has(k)) p.byStep.set(k, []);
+        p.byStep.get(k).push(n);
       }
     }
     if (!this.ctx) return;
@@ -143,13 +167,14 @@ export class Engine {
     return this.samples.get(id) ?? { status: this.ctx ? 'loading' : 'idle' };
   }
 
-  playSample(c, out, t, { pitch, vel, dur }) {
+  playSample(c, out, t, { pitch, vel, dur, pb }) {
     const s = this.samples.get(c.sample?.id);
     if (s?.status !== 'ready') return;
     const src = this.ctx.createBufferSource();
     src.buffer = s.buffer;
     const bend = this.bus(c.id).bend;
     bend.connect(src.detune);
+    if (pb) applySlide(src.detune, slideRamp(pb, t, dur));
     const g = this.ctx.createGain();
     g.gain.setValueAtTime(vel, t);
     src.connect(g).connect(out);
@@ -315,16 +340,21 @@ export class Engine {
 
   // ---------------------------------------------------------------- voices
 
-  /** Make channel `c` sound at time `t`. */
+  /**
+   * Make channel `c` sound at time `t`.
+   * opts: { pitch, vel (0..1), dur (s), lyric?: { ly, ph }, pb?: pitch slide }
+   */
   voice(c, t, opts) {
     const bus = this.bus(c.id);
     const out = bus.gain;
     if (instruments[c.inst]) {
       setBend(bus.bend);
+      setSlide(opts.pb ? slideRamp(opts.pb, t, opts.dur) : null);
       try {
         return instruments[c.inst](this.ctx, out, t, opts);
       } finally {
         setBend(null);
+        setSlide(null);
       }
     }
     if (c.inst === 'sample' || c.inst === 'samplekeys') return this.playSample(c, out, t, opts);
@@ -333,29 +363,46 @@ export class Engine {
       if (slot?.status !== 'ready') return;
       const vel = Math.max(1, Math.min(127, Math.round(opts.vel * 127)));
       const lyric = opts.lyric ? lyricEvent(opts.lyric, opts.pitch, t) : null;
-      sendEvents(
-        slot.node,
+      const events = [
         ...(lyric ? [lyric] : []),
         { type: 'wam-midi', time: t, data: { bytes: [0x90, opts.pitch, vel] } },
-        { type: 'wam-midi', time: t + opts.dur, data: { bytes: [0x80, opts.pitch, 0] } },
-      );
+      ];
+      if (opts.pb) {
+        const steps = slideSteps(opts.pb, t, opts.dur);
+        if (slot.descriptor?.notePitch) {
+          // coprod's plugins bend just this note, by any amount.
+          for (const [time, cents] of steps) events.push(notePitchEvent(opts.pitch, cents, time));
+        } else {
+          // Others: channel pitch bend, assuming the usual ±2 semitone range.
+          const bendTo = (cents) => Math.max(0, Math.min(16383, Math.round(8192 + (cents / 200) * 8192)));
+          for (const [time, cents] of steps) {
+            const v = bendTo(cents);
+            events.push({ type: 'wam-midi', time, data: { bytes: [0xe0, v & 0x7f, v >> 7] } });
+          }
+          events.push({ type: 'wam-midi', time: t + opts.dur, data: { bytes: [0xe0, 0, 64] } });
+        }
+      }
+      events.push({ type: 'wam-midi', time: t + opts.dur, data: { bytes: [0x80, opts.pitch, 0] } });
+      sendEvents(slot.node, ...events);
     }
   }
 
-  /** Play one note right now (clicking a key or placing a note); `lyric` is a note's { ly, ph }. */
-  preview(channel, pitch = INSTRUMENTS[channel.inst]?.root ?? 60, dur = 0.3, lyric = null) {
+  /** Play one note right now (clicking a key or placing a note); `note` may carry a lyric and slide. */
+  preview(channel, pitch = INSTRUMENTS[channel.inst]?.root ?? 60, dur = 0.3, note = null) {
     if (!this.ctx || this.ctx.state !== 'running') return;
+    const lyric = note?.ly ? note : null;
     // A sung syllable needs a moment for its consonants before the beat.
-    this.voice(channel, this.ctx.currentTime + (lyric ? 0.1 : 0.005), { pitch, vel: 0.8, dur, lyric });
+    this.voice(channel, this.ctx.currentTime + (lyric ? 0.1 : 0.005), { pitch, vel: 0.8, dur, lyric, pb: note?.pb });
   }
 
   // ---------------------------------------------------------------- transport
 
-  async play({ mode = this.mode, patternId = this.patternId } = {}) {
+  /** Start playing: the current pattern on a loop, or the arrangement from song step `from`. */
+  async play({ mode = this.mode, patternId = this.patternId, from = 0 } = {}) {
     await this.ensure();
     this.mode = mode;
     this.patternId = patternId;
-    this.cursor = { songIndex: 0, step: 0 };
+    this.cursor = { step: 0, songStep: Math.max(0, Math.floor(from)) };
     this.laneLast = new Map();
     this.laneStepped = new Map();
     this.nextTime = this.ctx.currentTime + 0.05;
@@ -394,32 +441,34 @@ export class Engine {
 
   currentPattern() {
     const p = this.project;
-    if (this.mode === 'song' && p.song.length) {
-      const id = p.song[this.cursor.songIndex % p.song.length];
-      return p.patterns.find((x) => x.id === id) ?? p.patterns[0];
-    }
     return p.patterns.find((x) => x.id === this.patternId) ?? p.patterns[0];
+  }
+
+  /** Song mode with clips to play (else Song mode just loops the current pattern). */
+  get arranging() {
+    return this.mode === 'song' && this.project.clips.length > 0;
   }
 
   tick() {
     if (!this.playing || !this.project) return;
     while (this.nextTime < this.ctx.currentTime + LOOKAHEAD_S) {
-      const pattern = this.currentPattern();
-      const length = pattern.bars * STEPS_PER_BAR;
-      if (this.cursor.step >= length) this.cursor.step = 0; // pattern got shorter
       const stepDur = 60 / this.project.bpm / 4;
-      this.scheduleStep(pattern, this.cursor.step, this.nextTime, stepDur);
-      this.marks.push({ time: this.nextTime, patternId: pattern.id, step: this.cursor.step, songIndex: this.cursor.songIndex });
-      if (this.marks.length > 64) this.marks.splice(0, this.marks.length - 64);
-
-      this.nextTime += stepDur;
-      this.cursor.step++;
-      if (this.cursor.step >= length) {
-        this.cursor.step = 0;
-        if (this.mode === 'song' && this.project.song.length) {
-          this.cursor.songIndex = (this.cursor.songIndex + 1) % this.project.song.length;
-        }
+      let active;
+      let songStep = null;
+      if (this.arranging) {
+        // Every clip under the playhead plays its pattern; the song loops at its end.
+        if (this.cursor.songStep >= songLength(this.project)) this.cursor.songStep = 0;
+        songStep = this.cursor.songStep++;
+        active = clipsAt(this.project, songStep).map((a) => ({ pattern: a.pattern, step: a.step }));
+      } else {
+        const pattern = this.currentPattern();
+        if (this.cursor.step >= pattern.bars * STEPS_PER_BAR) this.cursor.step = 0; // pattern got shorter
+        active = [{ pattern, step: this.cursor.step++ }];
       }
+      for (const a of active) this.scheduleStep(a.pattern, a.step, this.nextTime, stepDur);
+      this.marks.push({ time: this.nextTime, songStep, active: active.map((a) => ({ patternId: a.pattern.id, step: a.step })) });
+      if (this.marks.length > 64) this.marks.splice(0, this.marks.length - 64);
+      this.nextTime += stepDur;
     }
   }
 
@@ -431,7 +480,8 @@ export class Engine {
     }
     for (const n of pattern.byStep?.get(step) ?? []) {
       const c = this.project.channels.find((x) => x.id === n.ch);
-      if (c) this.voice(c, time, { pitch: n.p, vel: n.v / 127, dur: n.l * stepDur, lyric: n.ly ? n : null });
+      // Notes can start between steps (to 1/24 of a step).
+      if (c) this.voice(c, time + (n.s - step) * stepDur, { pitch: n.p, vel: n.v / 127, dur: n.l * stepDur, lyric: n.ly ? n : null, pb: n.pb });
     }
     this.scheduleAutomation(pattern, step, time, stepDur);
   }
@@ -485,7 +535,7 @@ export class Engine {
     }
   }
 
-  /** Where the playhead is right now, as heard (not as scheduled). */
+  /** Where the playhead is right now, as heard: { time, songStep, active: [{ patternId, step }] }. */
   position() {
     if (!this.playing || !this.ctx) return null;
     const now = this.ctx.currentTime;

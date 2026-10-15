@@ -459,7 +459,8 @@ input[type='range'] {
 }
 
 .miniroll {
-  width: calc(var(--step) * 16 + 3px * 15 + 12px);
+  /* as wide as the pattern's steps: n cells, n-1 gaps, an extra 4px every beat */
+  width: calc(var(--step) * var(--len, 16) + 3px * (var(--len, 16) - 1) + 4px * (var(--len, 16) / 4 - 1));
   height: 34px;
   border-radius: 6px;
   background: #1d2129;
@@ -538,11 +539,12 @@ input[type='range'] {
   position: relative;
 }
 
-#rollLyrics + #rollClose {
+#rollSlide ~ .ghost {
   margin-left: 0;
 }
 
-#rollLyrics.on {
+#rollLyrics.on,
+#rollSlide.on {
   border-color: var(--accent);
   color: var(--text);
   background: color-mix(in srgb, var(--accent) 14%, transparent);
@@ -581,53 +583,43 @@ input[type='range'] {
   display: flex;
   gap: 10px;
   align-items: baseline;
-}
-
-.song-row {
-  display: flex;
-  gap: 10px;
-  align-items: center;
   flex-wrap: wrap;
 }
 
-.song-strip {
-  display: flex;
-  gap: 4px;
+.song h3 .hint {
   flex: 1;
-  min-width: 240px;
-  min-height: 36px;
-  align-items: center;
+  min-width: 200px;
+}
+
+.playlist {
   background: var(--panel);
   border: 1px solid var(--line);
-  border-radius: 10px;
-  padding: 4px;
-  overflow-x: auto;
+  border-radius: 12px;
+  overflow: auto;
+  max-height: min(420px, 60vh);
 }
 
-.song-chip {
-  flex: 1 1 0;
-  min-width: 90px;
-  max-width: 220px;
-  height: 28px;
-  border-radius: 6px;
-  border: 0;
-  background: var(--panel2);
+.playlist-canvas {
+  display: block;
+  touch-action: none;
+}
+
+.hide-unused {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  padding: 0 8px;
+  gap: 6px;
   font-size: 12px;
-  white-space: nowrap;
-}
-
-.song-chip b {
   color: var(--muted);
-  font-weight: 400;
-  padding-left: 6px;
+  white-space: nowrap;
+  margin-left: auto;
 }
 
-.song-chip.now {
-  background: color-mix(in srgb, var(--accent) 30%, var(--panel2));
+#bars {
+  width: 58px;
+  background: var(--panel2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 4px 6px;
 }
 
 /* ---------------------------------------------------------------- overlays */

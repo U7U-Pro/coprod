@@ -16,10 +16,17 @@
 // include large things like custom wavetables.
 //   patterns  Y.Array  of Y.Map { id, name, bars, steps: Y.Map, notes: Y.Map }
 //               steps: "channelId:stepIndex" -> velocity (missing = off)
-//               notes: noteId -> { ch, p, s, l, v }  (pitch, start step, length, velocity)
+//               notes: noteId -> { ch, p, s, l, v, ly?, ph?, pb? }
+//                        pitch, start and length in steps (to 1/24 of a step),
+//                        velocity, lyric, phonemes, and a pitch slide
+//                        pb: [[x 0..1 along the note, semitones], ...]
 //               auto:    laneId -> { ch, target, label }   automation lanes
 //               autoPts: "laneId/pointId" -> { s, v }     their points (step, 0..1)
-//   song      Y.Array  of pattern ids, played in order in Song mode
+//   clips     Y.Map    clipId -> { p, t, s, l? }  the arrangement (Song mode):
+//               pattern id, track, start step, length in steps (default:
+//               the pattern's length; longer loops the pattern)
+//   song      Y.Array  of pattern ids: the old left-to-right song, converted
+//               to clips the first time anyone edits the arrangement
 //
 // Steps are keyed map entries rather than array slots so that two people
 // toggling the same step at once can't shift or duplicate anything: the map
@@ -31,6 +38,15 @@ export const SCHEMA_VERSION = 1;
 export const STEPS_PER_BAR = 16;
 export const MIN_PITCH = 24; // C1
 export const MAX_PITCH = 96; // C7
+export const MAX_BARS = 64; // per pattern
+export const TICKS = 24; // note positions are kept to 1/24 of a step (96 per beat, like FL Studio's default)
+export const SLIDE_RANGE = 24; // a note's pitch slide reaches ± this many semitones
+export const MAX_TRACKS = 32; // arrangement tracks
+export const MAX_SONG_STEPS = 999 * STEPS_PER_BAR;
+
+const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+/** Round a position or length (in steps) to the note grid. */
+export const tick = (x) => Math.round(x * TICKS) / TICKS;
 
 export const INSTRUMENTS = {
   kick: { label: 'Kick', kind: 'drum' },
@@ -114,6 +130,7 @@ const meta = (doc) => doc.getMap('meta');
 const channels = (doc) => doc.getArray('channels');
 const patterns = (doc) => doc.getArray('patterns');
 const song = (doc) => doc.getArray('song');
+const clips = (doc) => doc.getMap('clips');
 
 function findIndex(yarray, id) {
   const arr = yarray.toArray();
@@ -307,14 +324,42 @@ export function cleanPhonemes(ph) {
   return PHONEMES_RE.test(s) ? s : '';
 }
 
+/**
+ * A note's pitch slide: points [x (0..1 along the note), semitones], sorted,
+ * at most 64; null when it doesn't bend at all.
+ */
+export function cleanSlide(pb) {
+  if (!Array.isArray(pb)) return null;
+  const pts = pb
+    .filter((pt) => Array.isArray(pt) && Number.isFinite(+pt[0]) && Number.isFinite(+pt[1]))
+    .map(([x, v]) => [Math.round(clamp(+x, 0, 1) * 1000) / 1000, Math.round(clamp(+v, -SLIDE_RANGE, SLIDE_RANGE) * 100) / 100])
+    .sort((a, b) => a[0] - b[0])
+    .slice(0, 64);
+  return pts.length && pts.some((p) => p[1] !== 0) ? pts : null;
+}
+
+/** Semitones a slide adds at x (0..1 along the note): linear between points, held at the ends. */
+export function slideAt(pb, x) {
+  if (!pb?.length) return 0;
+  if (x <= pb[0][0]) return pb[0][1];
+  for (let i = 1; i < pb.length; i++) {
+    const [x1, v1] = pb[i];
+    if (x <= x1) {
+      const [x0, v0] = pb[i - 1];
+      return x1 > x0 ? v0 + ((v1 - v0) * (x - x0)) / (x1 - x0) : v1;
+    }
+  }
+  return pb.at(-1)[1];
+}
+
 const cleanNote = (n, maxStep) => {
-  const s = Math.max(0, Math.min(maxStep - 1, Math.round(n.s)));
+  const s = clamp(tick(+n.s || 0), 0, maxStep - 1 / TICKS);
   const out = {
     ch: String(n.ch),
-    p: Math.max(MIN_PITCH, Math.min(MAX_PITCH, Math.round(n.p))),
+    p: clamp(Math.round(n.p), MIN_PITCH, MAX_PITCH),
     s,
-    l: Math.max(1, Math.min(maxStep - s, Math.round(n.l ?? 1))),
-    v: Math.max(1, Math.min(127, Math.round(n.v ?? 100))),
+    l: clamp(tick(n.l ?? 1), 1 / TICKS, maxStep - s),
+    v: clamp(Math.round(n.v ?? 100), 1, 127),
   };
   const ly = cleanLyric(n.ly);
   if (ly) {
@@ -322,26 +367,63 @@ const cleanNote = (n, maxStep) => {
     const ph = cleanPhonemes(n.ph);
     if (ph) out.ph = ph;
   }
+  const pb = cleanSlide(n.pb);
+  if (pb) out.pb = pb;
   return out;
 };
 
+/** Make a pattern at least long enough to hold `end` steps (whole bars, up to MAX_BARS). */
+function growTo(p, end) {
+  const bars = Math.min(MAX_BARS, Math.ceil(end / STEPS_PER_BAR - 1e-9));
+  if (bars > p.get('bars')) p.set('bars', bars);
+}
+
+const maxStepOf = (p) => p.get('bars') * STEPS_PER_BAR;
+
+/** Add a note; writing past the end of the pattern makes it longer. */
 export function addNote(doc, patternId, note) {
+  return addNotes(doc, patternId, [note])[0] ?? null;
+}
+
+/** Add several notes at once (one undo step). Returns their ids. */
+export function addNotes(doc, patternId, notes) {
   const p = findPattern(doc, patternId);
-  if (!p) return null;
-  const id = newId();
-  p.get('notes').set(id, cleanNote(note, p.get('bars') * STEPS_PER_BAR));
-  return id;
+  if (!p) return [];
+  const ids = [];
+  doc.transact(() => {
+    growTo(p, Math.max(0, ...notes.map((n) => tick(+n.s || 0) + tick(n.l ?? 1))));
+    for (const n of notes) {
+      const id = newId();
+      p.get('notes').set(id, cleanNote(n, maxStepOf(p)));
+      ids.push(id);
+    }
+  });
+  return ids;
 }
 
 export function updateNote(doc, patternId, noteId, patch) {
+  updateNotes(doc, patternId, [{ id: noteId, ...patch }]);
+}
+
+/** Change several notes at once: [{ id, ...fields }] (one undo step). */
+export function updateNotes(doc, patternId, patches) {
   const p = findPattern(doc, patternId);
-  const cur = p?.get('notes').get(noteId);
-  if (!cur) return;
-  p.get('notes').set(noteId, cleanNote({ ...cur, ...patch }, p.get('bars') * STEPS_PER_BAR));
+  if (!p) return;
+  const notes = p.get('notes');
+  doc.transact(() => {
+    const next = patches.map(({ id, ...patch }) => notes.get(id) && { id, n: { ...notes.get(id), ...patch } }).filter(Boolean);
+    growTo(p, Math.max(0, ...next.map(({ n }) => tick(+n.s || 0) + tick(n.l ?? 1))));
+    for (const { id, n } of next) notes.set(id, cleanNote(n, maxStepOf(p)));
+  });
 }
 
 export function removeNote(doc, patternId, noteId) {
-  findPattern(doc, patternId)?.get('notes').delete(noteId);
+  removeNotes(doc, patternId, [noteId]);
+}
+
+export function removeNotes(doc, patternId, ids) {
+  const notes = findPattern(doc, patternId)?.get('notes');
+  if (notes) doc.transact(() => ids.forEach((id) => notes.delete(id)));
 }
 
 /** Set (or with '' clear) one note's lyric; phonemes are dropped unless given. */
@@ -352,9 +434,9 @@ export function setLyric(doc, patternId, noteId, ly, ph = '') {
 /**
  * Put syllables ([{ ly, ph }]) on a channel's notes in a pattern, one per note
  * in time order (highest note first in a chord). With more syllables than
- * notes, `fill: 'split'` halves the longest notes, and either way notes are
- * added after the last one (2 steps each) while the pattern has room (it
- * grows up to 4 bars). Notes left over lose their lyric.
+ * notes, `fill: 'split'` divides notes, and either way notes are added after
+ * the last one (2 steps each), growing the pattern (up to MAX_BARS). Notes
+ * left over lose their lyric.
  * Returns { assigned, split, added, dropped, cleared }.
  */
 export function assignLyrics(doc, patternId, channelId, syllables, { fill = 'split' } = {}) {
@@ -373,13 +455,16 @@ export function assignLyrics(doc, patternId, channelId, syllables, { fill = 'spl
     if (fill === 'split' && list.length && list.length < want.length) {
       // Each note gets a share of the syllables in proportion to its length
       // (at most one per step), then is cut into that many equal parts.
+      // Notes are cut in whole steps where possible, else in ticks.
+      const unit = (n) => (Number.isInteger(n.l) ? 1 : 1 / TICKS);
+      const units = (n) => Math.round(n.l / unit(n));
       const total = list.reduce((a, n) => a + n.l, 0);
       const ideal = list.map((n) => (n.l / total) * want.length);
-      const parts = list.map((n, i) => Math.max(1, Math.min(n.l, Math.floor(ideal[i]))));
+      const parts = list.map((n, i) => Math.max(1, Math.min(units(n), Math.floor(ideal[i]))));
       for (let have = parts.reduce((a, b) => a + b, 0); have < want.length; have++) {
         let best = -1;
         list.forEach((n, i) => {
-          if (parts[i] < n.l && (best < 0 || ideal[i] - parts[i] > ideal[best] - parts[best])) best = i;
+          if (parts[i] < units(n) && (best < 0 || ideal[i] - parts[i] > ideal[best] - parts[best])) best = i;
         });
         if (best < 0) break;
         parts[best]++;
@@ -388,11 +473,12 @@ export function assignLyrics(doc, patternId, channelId, syllables, { fill = 'spl
       list.forEach((n, i) => {
         if (parts[i] < 2) return;
         const { id, ...rest } = n;
-        const base = Math.floor(n.l / parts[i]);
+        const u = units(n);
+        const base = Math.floor(u / parts[i]);
         let s = n.s;
         for (let k = 0; k < parts[i]; k++) {
-          const l = base + (k < n.l % parts[i] ? 1 : 0);
-          notes.set(k === 0 ? id : newId(), cleanNote({ ...rest, s, l }, max));
+          const l = (base + (k < u % parts[i] ? 1 : 0)) * unit(n);
+          notes.set(k === 0 ? id : newId(), cleanNote({ ...rest, s, l, pb: null }, max));
           s += l;
         }
         result.split++;
@@ -402,9 +488,7 @@ export function assignLyrics(doc, patternId, channelId, syllables, { fill = 'spl
     if (list.length < want.length) {
       const last = list.reduce((a, n) => (n.s + n.l > a.s + a.l ? n : a), list[0] ?? { s: 0, l: 0, p: 60 });
       let s = last.s + last.l;
-      const need = s + 2 * (want.length - list.length);
-      const bars = [1, 2, 4].find((b) => b * STEPS_PER_BAR >= need) ?? 4;
-      if (bars > p.get('bars')) setPattern(doc, patternId, { bars });
+      growTo(p, s + 2 * (want.length - list.length));
       const max = p.get('bars') * STEPS_PER_BAR;
       while (list.length + result.added < want.length && s + 1 <= max) {
         notes.set(newId(), cleanNote({ ch: channelId, p: last.p, s, l: Math.min(2, max - s), v: 100 }, max));
@@ -474,10 +558,10 @@ export function clonePattern(doc, id) {
 export function removePattern(doc, id) {
   if (patterns(doc).length <= 1) return false;
   doc.transact(() => {
+    migrateSong(doc);
     const i = findIndex(patterns(doc), id);
     if (i >= 0) patterns(doc).delete(i, 1);
-    const s = song(doc);
-    for (let j = s.length - 1; j >= 0; j--) if (s.get(j) === id) s.delete(j, 1);
+    for (const [cid, c] of [...clips(doc).entries()]) if (c.p === id) clips(doc).delete(cid);
   });
   return true;
 }
@@ -487,7 +571,7 @@ export function setPattern(doc, id, patch) {
   if (!p) return;
   doc.transact(() => {
     if (typeof patch.name === 'string') p.set('name', patch.name.slice(0, 32) || p.get('name'));
-    if ([1, 2, 4].includes(patch.bars)) {
+    if (Number.isInteger(patch.bars) && patch.bars >= 1 && patch.bars <= MAX_BARS) {
       p.set('bars', patch.bars);
       // Drop anything that no longer fits.
       const max = patch.bars * STEPS_PER_BAR;
@@ -637,7 +721,42 @@ export function setCurve(doc, patternId, laneId, pointId, { c, t }) {
 }
 
 export function removePoint(doc, patternId, laneId, pointId) {
-  findPattern(doc, patternId)?.get('autoPts')?.delete(`${laneId}/${pointId}`);
+  removePoints(doc, patternId, laneId, [pointId]);
+}
+
+export function removePoints(doc, patternId, laneId, ids) {
+  const pts = findPattern(doc, patternId)?.get('autoPts');
+  if (pts) doc.transact(() => ids.forEach((id) => pts.delete(`${laneId}/${id}`)));
+}
+
+/** Move several points at once: [{ id, s, v }] (one undo step). */
+export function updatePoints(doc, patternId, laneId, patches) {
+  doc.transact(() => {
+    for (const { id, s, v } of patches) setPoint(doc, patternId, laneId, id, { s, v });
+  });
+}
+
+/**
+ * Paste points ([{ s, v, c?, t? }]) into a lane, replacing the lane's points
+ * between the first and last pasted one. Returns the new ids.
+ */
+export function pastePoints(doc, patternId, laneId, points) {
+  const p = findPattern(doc, patternId);
+  if (!p?.get('auto')?.has(laneId) || !points.length) return [];
+  const ids = [];
+  doc.transact(() => {
+    const pts = childMap(p, 'autoPts');
+    const lo = Math.min(...points.map((x) => x.s));
+    const hi = Math.max(...points.map((x) => x.s));
+    for (const [k, pt] of [...pts.entries()]) if (k.startsWith(`${laneId}/`) && pt.s >= lo && pt.s <= hi) pts.delete(k);
+    for (const pt of points) {
+      const id = setPoint(doc, patternId, laneId, null, pt);
+      if (pt.c && pt.c !== 'single') setCurve(doc, patternId, laneId, id, { c: pt.c, t: pt.t ?? 0 });
+      else if (pt.t) setCurve(doc, patternId, laneId, id, { t: pt.t });
+      ids.push(id);
+    }
+  });
+  return ids;
 }
 
 /** Index of the point whose segment contains `pos` (-1 before the first point). */
@@ -679,14 +798,112 @@ function readLanes(p) {
   }));
 }
 
-// ------------------------------------------------------------------ song + meta
+// ------------------------------------------------------------------ arrangement
 
-export function songAppend(doc, patternId) {
-  if (findPattern(doc, patternId)) song(doc).push([patternId]);
+const patternSteps = (doc, id) => (findPattern(doc, id)?.get('bars') ?? 1) * STEPS_PER_BAR;
+
+/**
+ * Rooms from before the arrangement had a left-to-right `song` list. The
+ * first arrangement edit turns it into clips on track 1. Ids are derived from
+ * the position, so two people converting at once write the same clips.
+ */
+function migrateSong(doc) {
+  const old = song(doc);
+  if (!old.length) return;
+  if (clips(doc).size === 0) {
+    let s = 0;
+    old.toArray().forEach((pid, i) => {
+      if (!findPattern(doc, pid)) return;
+      clips(doc).set(`song${i}`, { p: pid, t: 0, s });
+      s += patternSteps(doc, pid);
+    });
+  }
+  old.delete(0, old.length);
 }
 
-export function songRemove(doc, index) {
-  if (index >= 0 && index < song(doc).length) song(doc).delete(index, 1);
+function cleanClip(doc, c) {
+  if (!findPattern(doc, c.p)) return null;
+  const out = {
+    p: String(c.p),
+    t: clamp(Math.round(+c.t || 0), 0, MAX_TRACKS - 1),
+    s: clamp(Math.round(+c.s || 0), 0, MAX_SONG_STEPS - 1),
+  };
+  if (c.l != null && Number.isFinite(+c.l)) out.l = clamp(Math.round(+c.l), 1, MAX_SONG_STEPS - out.s);
+  return out;
+}
+
+/** Place clips ({ p, t, s, l? }) in the arrangement. Returns their ids. */
+export function addClips(doc, list) {
+  const ids = [];
+  doc.transact(() => {
+    migrateSong(doc);
+    for (const c of list) {
+      const clean = cleanClip(doc, c);
+      if (!clean) continue;
+      const id = newId();
+      clips(doc).set(id, clean);
+      ids.push(id);
+    }
+  });
+  return ids;
+}
+
+export function addClip(doc, clip) {
+  return addClips(doc, [clip])[0] ?? null;
+}
+
+/** Move or resize clips: [{ id, t?, s?, l? }] (l: null = back to the pattern's length). */
+export function updateClips(doc, patches) {
+  doc.transact(() => {
+    migrateSong(doc);
+    for (const { id, ...patch } of patches) {
+      const cur = clips(doc).get(id);
+      if (!cur) continue;
+      const next = { ...cur, ...patch };
+      if (patch.l === null) delete next.l;
+      const clean = cleanClip(doc, next);
+      if (clean) clips(doc).set(id, clean);
+    }
+  });
+}
+
+export function removeClips(doc, ids) {
+  doc.transact(() => {
+    migrateSong(doc);
+    for (const id of ids) clips(doc).delete(id);
+  });
+}
+
+/** Add a pattern after the last clip on the first track. */
+export function appendClip(doc, patternId) {
+  migrateSong(doc);
+  const end = Math.max(0, ...[...clips(doc).values()].filter((c) => c.t === 0).map((c) => c.s + (c.l ?? patternSteps(doc, c.p))));
+  return addClip(doc, { p: patternId, t: 0, s: end });
+}
+
+/** A clip's length in steps (its own, or its pattern's). */
+export function clipLength(clip, patternsById) {
+  return clip.l ?? (patternsById.get(clip.p)?.bars ?? 1) * STEPS_PER_BAR;
+}
+
+/** Where the arrangement ends (steps), 0 if it's empty. */
+export function songLength(project) {
+  const byId = new Map(project.patterns.map((p) => [p.id, p]));
+  return Math.max(0, ...project.clips.map((c) => c.s + clipLength(c, byId)));
+}
+
+/** Clips sounding at song step `step`, with the step inside each one's pattern. */
+export function clipsAt(project, step) {
+  const out = [];
+  const byId = project.patternsById ?? new Map(project.patterns.map((p) => [p.id, p]));
+  for (const c of project.clips) {
+    const len = clipLength(c, byId);
+    if (step < c.s || step >= c.s + len) continue;
+    const pattern = byId.get(c.p);
+    if (!pattern) continue;
+    out.push({ clip: c, pattern, step: (step - c.s) % (pattern.bars * STEPS_PER_BAR) });
+  }
+  return out;
 }
 
 export function setMeta(doc, patch) {
@@ -732,9 +949,24 @@ export function seedProject(doc) {
       [14, 2, 41],
     ])
       notes.set(newId(), { ch: id(bass), p: pitch, s, l, v: 100 });
-    song(doc).push([p.get('id')]);
+    clips(doc).set(newId(), { p: p.get('id'), t: 0, s: 0 });
   });
   return true;
+}
+
+/** The arrangement as stored, or (rooms not yet converted) the old song laid out on track 1. */
+function readClips(doc) {
+  if (clips(doc).size || !song(doc).length) return [...clips(doc).entries()].map(([id, c]) => ({ id, ...c }));
+  const out = [];
+  let s = 0;
+  song(doc)
+    .toArray()
+    .forEach((pid, i) => {
+      if (!findPattern(doc, pid)) return;
+      out.push({ id: `song${i}`, p: pid, t: 0, s });
+      s += patternSteps(doc, pid);
+    });
+  return out;
 }
 
 /** Plain-object snapshot for rendering and playback. */
@@ -767,9 +999,9 @@ export function readProject(doc) {
         notes: [...p.get('notes').entries()].map(([id, n]) => ({ id, ...n })),
         lanes: readLanes(p),
       })),
-    song: song(doc).toArray(),
+    clips: readClips(doc),
   };
 }
 
 /** The Y types an UndoManager should watch. */
-export const undoScope = (doc) => [meta(doc), channels(doc), patterns(doc), song(doc)];
+export const undoScope = (doc) => [meta(doc), channels(doc), patterns(doc), song(doc), clips(doc)];

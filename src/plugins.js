@@ -141,6 +141,17 @@ export function lyricEvent(lyric, pitch, time) {
   return { type: 'wam-sysex', time, data: { bytes: [0xf0, 0x7d, 0x4c, 0x59, pitch & 0x7f, ...body, 0xf7] } };
 }
 
+/**
+ * One note's pitch offset (a slide) as MIDI SysEx: F0 7D 4E 50 <pitch> <msb>
+ * <lsb> F7 ("NP"), the offset in cents + 8192 as 14 bits. Sent to plugins
+ * whose descriptor says `notePitch: true` (coprod's own); other plugins get
+ * channel pitch bend instead.
+ */
+export function notePitchEvent(pitch, cents, time) {
+  const v = Math.max(0, Math.min(16383, Math.round(cents) + 8192));
+  return { type: 'wam-sysex', time, data: { bytes: [0xf0, 0x7d, 0x4e, 0x50, pitch & 0x7f, v >> 7, v & 0x7f, 0xf7] } };
+}
+
 /** Send events if the node understands WAM events (plain AudioNodes don't). */
 export function sendEvents(node, ...events) {
   if (typeof node?.scheduleEvents === 'function') node.scheduleEvents(...events);

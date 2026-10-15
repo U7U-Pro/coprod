@@ -704,6 +704,216 @@ try {
   await (await ana.$('#channelPanel')).screenshot({ path: `${SHOTS}17-vocalist.png` });
   step(`The WAV export sings too (Vocalist solo, rms ${vocRms.toFixed(3)})`);
 
+  // ---- Selection, copy/paste, longer patterns, fine notes ----------------
+  // Pointer gestures on canvases, in content coordinates (works however it's scrolled).
+  const gesture = (page, selector, events) =>
+    page.evaluate(
+      ({ selector, events }) => {
+        const el = document.querySelector(selector);
+        const r = el.getBoundingClientRect();
+        for (const [type, x, y, mods = {}] of events) {
+          el.dispatchEvent(new PointerEvent(type, { clientX: r.left + x, clientY: r.top + y, button: type === 'contextmenu' ? 2 : 0, bubbles: true, cancelable: true, pointerId: 1, ...mods }));
+        }
+      },
+      { selector, events },
+    );
+  const rollGeom = (page) =>
+    page.evaluate(() => {
+      const grid = document.querySelector('#roll canvas.grid');
+      const { roll } = window.coprod;
+      return { cw: roll.cellW, width: grid.getBoundingClientRect().width };
+    });
+  const rowY = (pitch) => (96 - pitch + 0.5) * 16; // the roll's row for a pitch
+  await ana.click('#patternTabs .tab:first-child');
+  await ana.click(`.row[data-id="${bassId}"] .miniroll`);
+  await ana.waitForSelector('#rollPanel:not([hidden])');
+  let { cw } = await rollGeom(ana);
+  // Ctrl+drag a box around the first three bass notes (steps 0-7, pitches 33-45), copy.
+  await gesture(ana, '#roll canvas.grid', [
+    ['pointerdown', 0.2 * cw, rowY(46), { ctrlKey: true }],
+    ['pointermove', 7.5 * cw, rowY(32), { ctrlKey: true }],
+    ['pointerup', 7.5 * cw, rowY(32), { ctrlKey: true }],
+  ]);
+  if ((await ana.evaluate(() => window.coprod.roll.sel.size)) !== 3) throw new Error('box select did not pick 3 notes');
+  await ana.keyboard.press('Control+C');
+  // A new pattern; paste into it. The notes land where they were.
+  await ana.click('#addPattern');
+  await ana.waitForFunction(() => window.coprod.ui.project.patterns.length === 2 && window.coprod.ui.patternId === window.coprod.ui.project.patterns[1].id);
+  await ana.keyboard.press('Control+V');
+  const p2 = await ana.evaluate(() => window.coprod.ui.patternId);
+  await ben.waitForFunction(
+    ({ p2, bassId }) => {
+      const p = window.coprod.ui.project.patterns.find((x) => x.id === p2);
+      return p?.notes.filter((n) => n.ch === bassId).map((n) => `${n.s}:${n.p}`).sort().join() === '0:33,3:33,6:45';
+    },
+    { p2, bassId },
+  );
+  step('Ctrl+drag selects notes; Ctrl+C in one pattern, Ctrl+V in another: Ben sees them in the new pattern');
+
+  // Click in the empty bar after the pattern: the note goes there and the pattern grows a bar.
+  await ana.keyboard.press('Escape'); // the pasted notes are still selected; let go of them
+  ({ cw } = await rollGeom(ana));
+  await gesture(ana, '#roll canvas.grid', [
+    ['pointerdown', 20.5 * cw, rowY(40)],
+    ['pointerup', 20.5 * cw, rowY(40)],
+  ]);
+  await ben.waitForFunction((p2) => window.coprod.ui.project.patterns.find((x) => x.id === p2)?.bars === 2, p2);
+  step('Writing a note past the end of a 1-bar pattern makes it 2 bars, for Ben too');
+
+  // Alt+drag a note: it moves by a fraction of a step.
+  ({ cw } = await rollGeom(ana));
+  await gesture(ana, '#roll canvas.grid', [
+    ['pointerdown', 3.5 * cw, rowY(33), { altKey: true }],
+    ['pointermove', 3.5 * cw + 0.35 * cw, rowY(33), { altKey: true }],
+    ['pointerup', 3.5 * cw + 0.35 * cw, rowY(33), { altKey: true }],
+  ]);
+  await ben.waitForFunction(
+    ({ p2, bassId }) => {
+      const n = window.coprod.ui.project.patterns.find((x) => x.id === p2).notes.find((x) => x.ch === bassId && x.p === 33 && x.s > 3 && x.s < 4);
+      return n && Math.abs(n.s - (3 + 8 / 24)) < 1 / 24 + 1e-6;
+    },
+    { p2, bassId },
+  );
+  step('Alt+drag moves a note off the grid (to 1/24 of a step), and Ben has the same position');
+
+  // ---- Slides ----------------------------------------------------------
+  // Draw one in the roll: in Slide mode, drag from the middle of the note at step 6 up 5 rows.
+  await ana.click('#rollSlide');
+  ({ cw } = await rollGeom(ana));
+  await gesture(ana, '#roll canvas.grid', [
+    ['pointerdown', 6.5 * cw, rowY(45)],
+    ['pointermove', 7.2 * cw, rowY(47)],
+    ['pointermove', 7.9 * cw, rowY(50)],
+    ['pointerup', 7.9 * cw, rowY(50)],
+  ]);
+  await ben.waitForFunction(
+    ({ p2, bassId }) => {
+      const n = window.coprod.ui.project.patterns.find((x) => x.id === p2).notes.find((x) => x.ch === bassId && x.p === 45);
+      return n?.pb && Math.max(...n.pb.map((pt) => pt[1])) === 5 && n.pb[0][1] === 0;
+    },
+    { p2, bassId },
+  );
+  await (await ana.$('#rollPanel')).screenshot({ path: `${SHOTS}18-slide.png` });
+  await ana.click('#rollSlide');
+  step('In Slide mode, dragging along a note draws its pitch (here up 5 semitones); Ben has the same slide');
+
+  // Built-in synth: render a sliding note offline in the page and measure it.
+  const keysPitch = await ana.evaluate(async () => {
+    const { engine, ui } = window.coprod;
+    const keys = ui.project.channels.find((c) => c.inst === 'keys');
+    const sr = 48000;
+    const ctx = new OfflineAudioContext(1, sr * 1.2, sr);
+    const e = new engine.constructor({ context: ctx });
+    e.setProject(ui.project);
+    e.voice(keys, 0, { pitch: 69, vel: 1, dur: 1, pb: [[0, 0], [0.5, 0], [0.52, 12], [1, 12]] });
+    const out = (await ctx.startRendering()).getChannelData(0);
+    const hz = (t0, t1) => {
+      let c = 0;
+      for (let i = Math.floor(t0 * sr) + 1; i < t1 * sr; i++) if (out[i - 1] < 0 && out[i] >= 0) c++;
+      return c / (t1 - t0);
+    };
+    return [hz(0.3, 0.48), hz(0.65, 0.95)];
+  });
+  if (Math.abs(keysPitch[0] - 440) > 8 || Math.abs(keysPitch[1] - 880) > 12) throw new Error(`keys slide: ${keysPitch}`);
+  step(`A slide on the built-in Keys plays: ${keysPitch[0].toFixed(0)} Hz → ${keysPitch[1].toFixed(0)} Hz`);
+
+  // Vertex (a plugin): one A4 that slides up a fifth halfway, exported and measured.
+  await ana.click('#patternTabs .tab:first-child');
+  await ana.evaluate((id) => {
+    const { doc, S, ui, engine } = window.coprod;
+    const pat = ui.project.patterns[0];
+    for (const n of pat.notes.filter((x) => x.ch === id)) S.removeNote(doc, pat.id, n.id);
+    for (const l of pat.lanes.filter((x) => x.ch === id)) S.removeLane(doc, pat.id, l.id);
+    S.addNote(doc, pat.id, { ch: id, p: 69, s: 0, l: 16, pb: [[0, 0], [0.5, 0], [0.52, 7], [1, 7]] });
+    engine.solo.clear();
+    engine.setSolo(id, true);
+  }, vxId);
+  await ana.click('#exportBtn');
+  await ana.selectOption('#exWhat', 'pattern');
+  await ana.selectOption('#exLoops', '1');
+  await ana.selectOption('#exTail', '0');
+  const slideDl = ana.waitForEvent('download', { timeout: 30000 });
+  await ana.click('#exGo');
+  const slidePath = `${dataDir}/slide.wav`;
+  await (await slideDl).saveAs(slidePath);
+  await ana.evaluate(() => window.coprod.engine.solo.clear());
+  const sw = readFileSync(slidePath);
+  const sv = new DataView(sw.buffer, sw.byteOffset, sw.byteLength);
+  const sRate = sv.getUint32(24, true);
+  const sLeft = (i) => sv.getInt16(44 + i * 4, true);
+  const sPitch = (t0, t1) => {
+    let c = 0;
+    for (let i = Math.floor(t0 * sRate) + 1; i < t1 * sRate; i++) if (sLeft(i - 1) < 0 && sLeft(i) >= 0) c++;
+    return c / (t1 - t0);
+  };
+  const vxBefore = sPitch(0.15, 0.75);
+  const vxAfter = sPitch(1.0, 1.65);
+  if (Math.abs(vxBefore - 440) > 6 || Math.abs(vxAfter - 659.3) > 8) throw new Error(`Vertex slide: ${vxBefore.toFixed(1)} -> ${vxAfter.toFixed(1)} Hz`);
+  step(`A slide on Vertex, measured in the exported WAV: ${vxBefore.toFixed(1)} Hz → ${vxAfter.toFixed(1)} Hz (A4 up a fifth)`);
+
+  // ---- Arrangement -------------------------------------------------------
+  // Pattern 2 on the second track at bar 1: it plays at the same time as pattern 1.
+  await ana.click(`#patternTabs .tab:nth-child(2)`);
+  await ana.locator('#playlist').scrollIntoViewIfNeeded();
+  const barW = await ana.evaluate(() => window.coprod.playlist.barW);
+  await gesture(ana, '#playlist canvas', [
+    ['pointerdown', 6, 22 + 34 + 12],
+    ['pointerup', 6, 22 + 34 + 12],
+  ]);
+  // ...and again on the first track at bar 5, after a gap.
+  await gesture(ana, '#playlist canvas', [
+    ['pointerdown', 4 * barW + 6, 22 + 12],
+    ['pointerup', 4 * barW + 6, 22 + 12],
+  ]);
+  await ben.waitForFunction(
+    (p2) => {
+      const clips = window.coprod.ui.project.clips;
+      return clips.some((c) => c.p === p2 && c.t === 1 && c.s === 0) && clips.some((c) => c.p === p2 && c.t === 0 && c.s === 64);
+    },
+    p2,
+  );
+  await ana.click('button[data-mode="song"]');
+  await ana.click('#play');
+  await ana.waitForFunction(() => window.coprod.engine.position()?.active.length === 2, null, { timeout: 8000 });
+  await ana.waitForFunction(() => {
+    const pos = window.coprod.engine.position();
+    return pos && pos.songStep >= 34 && pos.songStep < 60 && pos.active.length === 0;
+  }, null, { timeout: 15000 });
+  await ana.click('#play');
+  await (await ana.$('.song')).screenshot({ path: `${SHOTS}19-arrangement.png` });
+  await ana.click('button[data-mode="pattern"]');
+  step('Arrangement: two patterns on two tracks play at once, then a gap plays silence (Ben sees the same clips)');
+
+  // ---- Automation points: copy from one lane, paste into another ---------------
+  // (kickId: the first channel, the kick)
+  await ana.click('#patternTabs .tab:first-child');
+  const lanes = await ana.evaluate((id) => {
+    const { doc, S, ui } = window.coprod;
+    const pid = ui.project.patterns[0].id;
+    for (const l of ui.project.patterns[0].lanes.filter((x) => x.ch === id)) S.removeLane(doc, pid, l.id); // from earlier steps
+    const vol = S.addLane(doc, pid, id, 'vol', 'Volume');
+    const pan = S.addLane(doc, pid, id, 'pan', 'Pan');
+    [[0, 0.2], [4, 0.9], [8, 0.5]].forEach(([s, v]) => S.setPoint(doc, pid, vol, null, { s, v }));
+    return { vol, pan };
+  }, kickId);
+  await ana.click(`.row[data-id="${kickId}"] .autobtn`);
+  await ana.waitForSelector('#autoPanel:not([hidden]) .ap-lanes .tab');
+  await ana.click('#autoPanel .ap-lanes .tab:has-text("Volume")');
+  await gesture(ana, '#autoPanel .ap-canvas', [
+    ['pointerdown', 2, 2, { ctrlKey: true }],
+    ['pointerup', 2, 2, { ctrlKey: true }],
+  ]);
+  await ana.keyboard.press('Control+A');
+  await ana.keyboard.press('Control+C');
+  await ana.click('#autoPanel .ap-lanes .tab:has-text("Pan")');
+  await ana.keyboard.press('Control+V');
+  await ben.waitForFunction(
+    (pan) => window.coprod.ui.project.patterns[0].lanes.find((l) => l.id === pan)?.points.map((p) => `${p.s}:${p.v}`).join() === '0:0.2,4:0.9,8:0.5',
+    lanes.pan,
+  );
+  await ana.click('#autoPanel .ap-close');
+  step('Automation: Ctrl+A, Ctrl+C on the volume lane, Ctrl+V on the pan lane: Ben has the same points');
+
   // A phone-sized third person.
   const cara = await join_('Cara', { width: 390, height: 844 });
   await cara.waitForFunction(() => document.querySelectorAll('#people .avatar').length === 3);

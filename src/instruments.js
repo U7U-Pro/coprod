@@ -3,6 +3,7 @@
 // samples someone else might not have.
 //
 // Each instrument: (ctx, out, time, { pitch, vel, dur }) => void
+// (pitch bend and a note's slide reach the oscillators through play()).
 
 const hz = (midi) => 440 * 2 ** ((midi - 69) / 12);
 
@@ -39,11 +40,24 @@ function adsr(ctx, time, peak, { a = 0.005, d = 0.1, s = 0.7, r = 0.1 }, dur) {
   return g;
 }
 
-// The engine sets this around each note so its oscillators (and noise
-// players) follow the channel's pitch-bend signal, in cents.
+// The engine sets these around each note so its oscillators (and noise
+// players) follow the channel's pitch-bend signal, in cents, and the note's
+// own pitch slide: [[time, cents], ...] ramped between.
 let bend = null;
+let slide = null;
 export function setBend(node) {
   bend = node;
+}
+export function setSlide(points) {
+  slide = points;
+}
+
+/** Ramp an AudioParam (in cents, on top of its current value) along a slide. */
+export function applySlide(param, points) {
+  if (!points?.length) return;
+  const base = param.value;
+  param.setValueAtTime(base + points[0][1], points[0][0]);
+  for (let i = 1; i < points.length; i++) param.linearRampToValueAtTime(base + points[i][1], points[i][0]);
 }
 
 function play(src, time, stopAt) {
@@ -56,6 +70,7 @@ function play(src, time, stopAt) {
       } catch {}
     });
   }
+  if (slide && src.detune) applySlide(src.detune, slide);
   src.start(time);
   src.stop(stopAt);
 }

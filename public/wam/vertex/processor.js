@@ -57,6 +57,8 @@ class VertexProcessor extends AudioWorkletProcessor {
       else if (cmd === 0x80) e.noteOff(a);
       else if (cmd === 0xb0) e.cc(a, b);
       else if (cmd === 0xe0) e.pitchBend((b << 7) | a);
+    } else if (ev.kind === 'npitch') {
+      e.notePitch(ev.note, ev.cents);
     } else if (ev.kind === 'auto') {
       e.setAutomation(ev.i, ev.v);
     } else if (ev.kind === 'transport') {

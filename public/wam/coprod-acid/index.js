@@ -26,7 +26,8 @@ const DESCRIPTOR = {
   hasMpeOutput: false,
   hasOscInput: false,
   hasOscOutput: false,
-  hasSysexInput: false,
+  hasSysexInput: true,
+  notePitch: true, // coprod: per-note pitch slides
   hasSysexOutput: false,
 };
 
@@ -72,6 +73,12 @@ class AcidNode extends GainNode {
         continue;
       }
       if (e.type === 'wam-transport' && e.data?.playing === false) this.auto = {};
+      if (e.type === 'wam-sysex') {
+        const b = e.data?.bytes;
+        // coprod's per-note pitch (a slide): F0 7D 4E 50 note msb lsb F7, cents + 8192
+        if (b?.[0] === 0xf0 && b[1] === 0x7d && b[2] === 0x4e && b[3] === 0x50) this.notePitch(b[4], ((b[5] << 7) | b[6]) - 8192, Math.max(e.time ?? 0, this.context.currentTime));
+        continue;
+      }
       if (e.type !== 'wam-midi') continue;
       const [status, note, vel] = e.data.bytes;
       const time = Math.max(e.time ?? 0, this.context.currentTime);
@@ -102,7 +109,7 @@ class AcidNode extends GainNode {
     vca.gain.linearRampToValueAtTime(0.32 * vel * p.vol, t + 0.004);
     osc.connect(filter).connect(vca).connect(this);
     osc.start(t);
-    const voice = { osc, vca };
+    const voice = { osc, vca, slide: 0 };
     if (!this.voices.has(note)) this.voices.set(note, []);
     this.voices.get(note).push(voice);
     osc.onended = () => {
@@ -115,7 +122,16 @@ class AcidNode extends GainNode {
 
   pitchBend(cents, t) {
     this.bend = cents;
-    for (const list of this.voices.values()) for (const v of list) v.osc.detune.setTargetAtTime(cents, t, 0.005);
+    for (const list of this.voices.values()) for (const v of list) v.osc.detune.setTargetAtTime(cents + v.slide, t, 0.005);
+  }
+
+  /** One note's own pitch slide, in cents. */
+  notePitch(note, cents, t) {
+    for (const v of this.voices.get(note) ?? []) {
+      if (v.released) continue;
+      v.slide = cents;
+      v.osc.detune.setTargetAtTime(this.bend + cents, t, 0.004);
+    }
   }
 
   noteOff(note, t) {

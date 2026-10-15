@@ -56,8 +56,13 @@ export class GrainsEngine extends ParamEngine {
       held: true,
       scan: 0, // seconds the playhead has moved since the note started
       next: 0, // samples until the next grain
+      slide: 0, // semitones, from the note's pitch slide (new grains follow it)
       age: ++this.age,
     });
+  }
+
+  notePitch(note, cents) {
+    for (const v of this.voices) if (v.active && v.note === note && v.held) v.slide = cents / 100;
   }
 
   noteOff(note) {
@@ -84,7 +89,7 @@ export class GrainsEngine extends ParamEngine {
     const r = this.rand;
     let start = p.position * dur + v.scan + (r() * 2 - 1) * p.spray;
     start = (((start % dur) + dur) % dur) * this.sr;
-    const semis = p.pitch + (p.keytrack === 0 ? v.note - 60 : 0) + (r() * 2 - 1) * p.detune + this.bend;
+    const semis = p.pitch + (p.keytrack === 0 ? v.note - 60 + v.slide : 0) + (r() * 2 - 1) * p.detune + this.bend;
     const rate = 2 ** (semis / 12);
     const len = Math.max(16, Math.round(p.size * this.sr));
     const [gl, gr] = panGains((r() * 2 - 1) * p.spread);

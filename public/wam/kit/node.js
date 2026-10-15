@@ -56,6 +56,15 @@ export const isAudioFile = (f) => f && (f.type?.startsWith('audio/') || AUDIO_FI
 
 // ------------------------------------------------------------------ node
 
+/**
+ * coprod's per-note pitch (a note's slide) as SysEx: F0 7D 4E 50 <note> <msb> <lsb> F7,
+ * the offset in cents + 8192. Returns { note, cents } or null.
+ */
+export function parseNotePitch(bytes) {
+  if (!bytes || bytes[0] !== 0xf0 || bytes[1] !== 0x7d || bytes[2] !== 0x4e || bytes[3] !== 0x50) return null;
+  return { note: bytes[4], cents: ((bytes[5] << 7) | bytes[6]) - 8192 };
+}
+
 /** A WAM 2.0 audio node with normalized, automatable parameters. */
 export class ParamNode extends AudioWorkletNode {
   /**
@@ -140,6 +149,8 @@ export class ParamNode extends AudioWorkletNode {
           this.autoValues.clear();
           this.emit('param');
         }
+      } else if (e.type === 'wam-sysex' && parseNotePitch(e.data?.bytes)) {
+        out.push({ kind: 'npitch', time, ...parseNotePitch(e.data.bytes) });
       } else {
         const own = this.translateEvent?.(e, time); // subclasses: other event types
         if (own) out.push(own);
@@ -362,7 +373,8 @@ export const descriptor = (fields) => ({
   hasMpeOutput: false,
   hasOscInput: false,
   hasOscOutput: false,
-  hasSysexInput: false,
+  hasSysexInput: true,
   hasSysexOutput: false,
+  notePitch: true, // coprod: bends single notes (slides) via the NP SysEx above
   ...fields,
 });

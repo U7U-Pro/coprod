@@ -5,7 +5,7 @@
 // what everyone hears, minus anything you haven't allowed to load.
 
 import { Engine } from './audio.js';
-import { STEPS_PER_BAR } from './shared/schema.js';
+import { STEPS_PER_BAR, songLength, clipsAt } from './shared/schema.js';
 import { encodeWav, peakDb } from './wav.js';
 
 /**
@@ -38,13 +38,12 @@ async function masterLatency(sampleRate) {
  */
 export async function renderProject(project, opts, live) {
   const stepDur = 60 / project.bpm / 4;
-  // The sequence of patterns to play, in order.
-  const order =
-    opts.what === 'song' && project.song.length
-      ? project.song
-      : Array.from({ length: Math.max(1, opts.loops | 0) }, () => opts.patternId);
-  const patterns = order.map((id) => project.patterns.find((p) => p.id === id)).filter(Boolean);
-  const steps = patterns.reduce((n, p) => n + p.bars * STEPS_PER_BAR, 0);
+  // Song: the arrangement from its start to its end (patterns may overlap).
+  // Pattern: one pattern, looped.
+  const song = opts.what === 'song' && project.clips.length > 0;
+  const pattern = project.patterns.find((p) => p.id === opts.patternId) ?? project.patterns[0];
+  const loops = Math.max(1, opts.loops | 0);
+  const steps = song ? songLength(project) : loops * pattern.bars * STEPS_PER_BAR;
   const lead = 0; // offline: no latency to hide, and loops must start exactly at 0
   const seconds = lead + steps * stepDur + Math.max(0, opts.tail ?? 2);
   const sampleRate = opts.sampleRate ?? live.ctx?.sampleRate ?? 48000;
@@ -71,14 +70,11 @@ export async function renderProject(project, opts, live) {
   engine.sendTransport();
   engine.laneLast = new Map();
   engine.laneStepped = new Map();
-  let t = lead;
-  for (const pattern of patterns) {
-    const length = pattern.bars * STEPS_PER_BAR;
-    const p = engine.project.patterns.find((x) => x.id === pattern.id);
-    for (let step = 0; step < length; step++) {
-      engine.scheduleStep(p, step, t, stepDur);
-      t += stepDur;
-    }
+  const length = pattern.bars * STEPS_PER_BAR;
+  for (let step = 0; step < steps; step++) {
+    const t = lead + step * stepDur;
+    if (song) for (const a of clipsAt(engine.project, step)) engine.scheduleStep(a.pattern, a.step, t, stepDur);
+    else engine.scheduleStep(pattern, step % length, t, stepDur);
   }
   const audio = await offline.startRendering();
   for (const slot of engine.slots.values()) {

@@ -8,7 +8,7 @@
 // events as soon as they arrive, with their times, and schedules them itself.
 
 const BLOCK = 32;
-const isNote = (ev) => ev.kind === 'lyric' || (ev.kind === 'midi' && (ev.bytes[0] & 0xe0) === 0x80);
+const isNote = (ev) => ev.kind === 'lyric' || ev.kind === 'npitch' || (ev.kind === 'midi' && (ev.bytes[0] & 0xe0) === 0x80);
 
 export function registerEngine(name, Engine) {
   class Processor extends AudioWorkletProcessor {
@@ -60,6 +60,8 @@ export function registerEngine(name, Engine) {
         else if (cmd === 0x80 || cmd === 0x90) e.noteOff(a);
         else if (cmd === 0xb0) e.cc(a, b);
         else if (cmd === 0xe0) e.pitchBend((b << 7) | a);
+      } else if (ev.kind === 'npitch') {
+        e.notePitch?.(ev.note, ev.cents);
       } else if (ev.kind === 'auto') {
         e.setAutomation(ev.i, ev.v);
       } else if (ev.kind === 'transport') {

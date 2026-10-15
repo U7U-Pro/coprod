@@ -26,11 +26,33 @@ npm start          # serves dist/ and the sync socket on $PORT (default 3000)
 
 - **Channel rack**: drum channels with a step grid (click or drag to paint), synth
   channels with a mini preview of their notes. Per-channel volume, pan, mute
-  (shared) and solo (just for you).
+  (shared) and solo (just for you). **Hide unused** (just for you) hides channels
+  with nothing in the current pattern.
 - **Piano roll** for synth channels: click to add, drag to move, drag the end to
   resize, click a note to delete. Other synth channels show as faint ghost notes.
-- **Patterns** of 1, 2 or 4 bars (add, clone, rename by double-clicking, delete), and a
-  **Song** strip that plays patterns in order.
+  - **Alt** while dragging moves or resizes freely, to 1/24 of a step (1/96 of a
+    beat, like FL Studio). Notes play at their exact position.
+  - **Ctrl+drag** draws a selection box (Ctrl+click adds or removes one note).
+    Dragging a selected note moves or resizes them all. **Delete**,
+    **Ctrl+C / Ctrl+X / Ctrl+V** (paste into any pattern or channel, at the same
+    time), **Ctrl+A**, **Ctrl+B** (duplicate right after), **Esc**.
+  - **〰 Slide** mode, Ableton-style: drag along a note to draw its pitch over its
+    length, ±24 semitones (Shift draws a straight line, Alt gives 0.1 semitone
+    steps). Drag a point to move it; right-click a point, or a note, to remove.
+    Slides play on built-in synths and samples, per note on coprod's plugins,
+    and as pitch bend on other plugins (within their bend range, usually
+    ±2 semitones).
+  - There's always an empty bar after the pattern: writing a note there makes the
+    pattern a bar longer.
+- **Patterns** of any length from 1 to 64 bars (add, clone, rename by
+  double-clicking, delete).
+- **Arrangement** (Song mode), FL-style: tracks of pattern clips placed anywhere.
+  They can overlap (those patterns play together) and leave gaps. Click to place
+  the current pattern (on the bar; Alt: the beat), drag to move, and drag a clip's
+  end to stretch it, which loops the pattern. Right-click deletes, and clicking a
+  clip opens its pattern. Ctrl+drag selects, with the same copy/paste/duplicate
+  keys. Click the ruler to play from there; Ctrl+wheel zooms. Rooms from before
+  the arrangement keep their song: it's laid out on the first track.
 - **11 built-in instruments**: kick, snare, clap, hats, perc, bass, lead, pluck, keys, pad.
   All are synthesized in the browser, so everyone hears exactly the same thing.
 - **Your own samples**: drop audio files (wav, mp3, ogg, flac, m4a, up to 15 MB) on the
@@ -104,6 +126,9 @@ npm start          # serves dist/ and the sync socket on $PORT (default 3000)
   middle of a segment to bend it. Click to add
   points, drag to move. Lanes are part of the shared project, so everyone hears them
   when they press play; when playback stops, knobs go back to their saved values.
+  Ctrl+drag selects points (dragging one moves them all). Ctrl+C / Ctrl+V copies
+  them into any lane of any pattern, replacing what's there across that span.
+  Delete, Ctrl+A, Ctrl+B and Esc work too.
 - **Multiplayer**: live edits, avatars, colored name tags on the channel each
   person is working on, live cursors in the piano roll, dots on the pattern tabs
   showing who's where.
@@ -165,6 +190,13 @@ browser ── edits (Yjs updates) ──► server/rooms.js ──► every oth
   `coprod:lyrics` (`{ syllables: [{ ly, ph }], fill }`) puts syllables on the
   channel's notes (`assignLyrics` in the schema).
 - `src/automation.js`: the automation lane editor; lanes are scheduled in `audio.js`.
+- `src/playlist.js`: the arrangement editor. In Song mode the scheduler plays every
+  clip under the playhead each step (`clipsAt` in the schema). `src/clipboard.js` is
+  the clipboard and selection helpers shared by the editors.
+- Note slides reach plugins as SysEx before and during the note:
+  `F0 7D 4E 50 <note> <msb> <lsb> F7`, the note's offset in cents + 8192. Plugins
+  whose descriptor has `notePitch: true` (coprod's own) bend just that note; other
+  plugins get channel pitch bend instead.
 - `src/export.js`, `src/wav.js`: offline rendering and WAV encoding.
 - `plugins/dexed/`: the Dexed port: Dexed's engine source (GPLv3), the small shims
   that replace JUCE, a C interface (`dexed_wasm.cpp`), and `build.sh` to rebuild
@@ -229,12 +261,15 @@ worklets some plugins use on secure pages (localhost is fine for development).
   behind a reverse proxy everyone shares one address.
 - Each person's play button is independent (like each person scrolling their own
   copy of a doc). There's no "play for everyone" yet.
-- No audio export yet.
+- Automation lives in patterns. When two clips of patterns that automate the same
+  knob overlap in the arrangement, the last one scheduled wins at each step.
+- Slides on Dexed (and other plugins from other sites) use channel pitch bend, so
+  overlapping notes bend together.
 
 ## Ideas / next steps
 
-1. **Per-note pitch curves** (like Ableton's): draw the pitch of each note along
-   its length in the piano roll.
+1. **Automation clips in the arrangement** (song-level automation that spans
+   patterns), and drag-and-drop of patterns from a list into it.
 2. **More bundled plugins** (a drum machine), and MIDI plugins from the
    community registry (arpeggiators, sequencers).
 3. **Vertex**: more warp modes, a WebAssembly/SIMD engine for more voices, and

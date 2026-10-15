@@ -7,6 +7,7 @@ import { Rack } from './rack.js';
 import { PianoRoll } from './pianoroll.js';
 import { ChannelPanel } from './channelpanel.js';
 import { AutomationPanel } from './automation.js';
+import { Playlist } from './playlist.js';
 import { CATALOG, communityPlugins, trustOrigin, nameFromUrl, pluginOrigin } from './plugins.js';
 import { renderProject, download } from './export.js';
 
@@ -38,6 +39,8 @@ const ui = {
   rollChannel: null, // synth channel open in the piano roll
   focusChannel: null, // last channel I touched (shown to others)
   mode: 'pattern',
+  songStart: 0, // song step Song mode plays from (mine)
+  active: null, // the editor keyboard shortcuts go to: 'roll' | 'auto' | 'playlist'
 };
 
 // ------------------------------------------------------------------ me
@@ -123,12 +126,14 @@ const rack = new Rack($('rack'), {
 const roll = new PianoRoll($('roll'), {
   beginGesture: () => undo.stopCapturing(),
   addNote: (n) => S.addNote(doc, currentPattern().id, { ...n, ch: ui.rollChannel }),
-  updateNote: (id, patch) => S.updateNote(doc, currentPattern().id, id, patch),
-  removeNote: (id) => S.removeNote(doc, currentPattern().id, id),
+  addNotes: (notes) => S.addNotes(doc, currentPattern().id, notes.map((n) => ({ ...n, ch: ui.rollChannel }))),
+  updateNotes: (patches) => S.updateNotes(doc, currentPattern().id, patches),
+  removeNotes: (ids) => S.removeNotes(doc, currentPattern().id, ids),
   setLyric: (id, text) => S.setLyric(doc, currentPattern().id, id, text),
   preview: (pitch, note) => {
     const c = channelById(ui.rollChannel);
-    if (c) engine.ensure().then(() => engine.preview(c, pitch, note?.ly ? 0.4 : 0.25, note?.ly ? note : null));
+    const dur = note?.pb ? Math.min(2, (note.l * 15) / ui.project.bpm) : note?.ly ? 0.4 : 0.25;
+    if (c) engine.ensure().then(() => engine.preview(c, pitch, dur, note));
   },
   cursor: throttle((pos) => publishPresence({ cursor: pos }), 50),
 });
@@ -154,15 +159,12 @@ const channelPanel = new ChannelPanel($('channelPanel'), engine, {
   },
   browseEffects: (ch) => openPlugins({ kind: 'effect', channel: ch }),
   setNotes: (ch, notes) => {
-    // Replace this channel's notes in the current pattern, growing it (up to 4 bars) to fit.
+    // Replace this channel's notes in the current pattern; it grows to fit.
     const p = currentPattern();
-    const end = Math.max(0, ...notes.map((n) => n.s + n.l));
-    const bars = [1, 2, 4].find((b) => b * S.STEPS_PER_BAR >= end) ?? 4;
     undo.stopCapturing();
     doc.transact(() => {
-      if (bars > p.bars) S.setPattern(doc, p.id, { bars });
-      for (const n of p.notes) if (n.ch === ch) S.removeNote(doc, p.id, n.id);
-      for (const n of notes) if (n.s < bars * S.STEPS_PER_BAR) S.addNote(doc, p.id, { ch, p: n.p, s: n.s, l: n.l, v: n.v ?? 100 });
+      S.removeNotes(doc, p.id, p.notes.filter((n) => n.ch === ch).map((n) => n.id));
+      S.addNotes(doc, p.id, notes.map((n) => ({ ch, p: n.p, s: n.s, l: n.l, v: n.v ?? 100 })));
     });
     openRoll(ch);
   },
@@ -181,10 +183,32 @@ const autoPanel = new AutomationPanel($('autoPanel'), engine, {
   setLane: (lane, patch) => S.setLane(doc, currentPattern().id, lane, patch),
   setPoint: (lane, point, pos) => S.setPoint(doc, currentPattern().id, lane, point, pos),
   removePoint: (lane, point) => S.removePoint(doc, currentPattern().id, lane, point),
+  removePoints: (lane, ids) => S.removePoints(doc, currentPattern().id, lane, ids),
+  updatePoints: (lane, patches) => S.updatePoints(doc, currentPattern().id, lane, patches),
+  pastePoints: (lane, points) => S.pastePoints(doc, currentPattern().id, lane, points),
   setCurve: (lane, point, curve) => S.setCurve(doc, currentPattern().id, lane, point, curve),
   beginGesture: () => undo.stopCapturing(),
   onClose: () => render(),
 });
+
+const playlist = new Playlist($('playlist'), {
+  beginGesture: () => undo.stopCapturing(),
+  activate: () => (ui.active = 'playlist'),
+  addClip: (clip) => S.addClip(doc, clip),
+  addClips: (clips) => S.addClips(doc, clips),
+  updateClips: (patches) => S.updateClips(doc, patches),
+  removeClips: (ids) => S.removeClips(doc, ids),
+  selectPattern: (id) => selectPattern(id),
+  setStart: (step) => {
+    ui.songStart = step;
+    if (engine.playing && ui.mode === 'song') engine.play({ mode: 'song', patternId: ui.patternId, from: step });
+    render();
+  },
+});
+
+// Keyboard shortcuts go to the editor you last clicked in.
+$('roll').addEventListener('pointerdown', () => (ui.active = 'roll'), true);
+$('autoPanel').addEventListener('pointerdown', () => (ui.active = 'auto'), true);
 
 function openAuto(id) {
   focusChannel(id);
@@ -460,7 +484,13 @@ function renderNow() {
   $('deletePattern').disabled = p.patterns.length <= 1;
 
   // Rack + roll
-  rack.render(p, pattern, { solo: engine.solo, selectedChannel: ui.rollChannel ?? channelPanel.channelId, remote, status: channelStatus });
+  rack.render(p, pattern, {
+    solo: engine.solo,
+    selectedChannel: ui.rollChannel ?? channelPanel.channelId,
+    remote,
+    status: channelStatus,
+    visible: $('hideUnused').checked ? usedIn(pattern) : null,
+  });
   channelPanel.render(p);
   autoPanel.render(p, pattern);
   const rollCh = channelById(ui.rollChannel);
@@ -472,32 +502,29 @@ function renderNow() {
     // Lyrics editing, for plugins that sing (or notes that already have lyrics).
     const sings = !!engine.slots.get(rollCh.id)?.descriptor?.lyrics || pattern.notes.some((n) => n.ch === rollCh.id && n.ly);
     $('rollLyrics').hidden = !sings;
-    if (!sings && roll.lyricMode) roll.setLyricMode(false);
-    $('rollLyrics').classList.toggle('on', roll.lyricMode);
-    $('rollLyrics').setAttribute('aria-pressed', roll.lyricMode);
-    $('rollHint').textContent = roll.lyricMode
-      ? 'Click a note to type its lyric · Tab: next note · several words fill the next notes'
-      : 'Click to add · drag to move · drag the end to resize · click a note to delete';
+    if (!sings && roll.lyricMode) roll.setMode('notes');
+    for (const [id, mode] of [['rollLyrics', 'lyrics'], ['rollSlide', 'slide']]) {
+      $(id).classList.toggle('on', roll.mode === mode);
+      $(id).setAttribute('aria-pressed', roll.mode === mode);
+    }
+    $('rollHint').textContent = {
+      lyrics: 'Click a note to type its lyric · Tab: next note · several words fill the next notes',
+      slide: "Drag along a note to draw its pitch (Shift: straight line · Alt: fine) · drag a point to move it · right-click a point (or a note) to remove",
+      notes: 'Click to add · drag to move or resize (Alt: fine) · click a note to delete · Ctrl+drag to select, then Ctrl+C / Ctrl+V / Delete',
+    }[roll.mode];
   }
 
-  // Song strip
-  $('songStrip').replaceChildren(
-    ...p.song.map((pid, i) => {
-      const pt = p.patterns.find((x) => x.id === pid);
-      const chip = document.createElement('button');
-      chip.className = 'song-chip';
-      chip.dataset.index = i;
-      chip.style.flexGrow = pt?.bars ?? 1;
-      chip.innerHTML = `<span></span><b aria-label="Remove">✕</b>`;
-      chip.firstChild.textContent = pt?.name ?? '?';
-      chip.onclick = (e) => {
-        if (e.target.tagName === 'B') S.songRemove(doc, i);
-        else selectPattern(pid);
-      };
-      return chip;
-    }),
-  );
-  if (!p.song.length) $('songStrip').innerHTML = '<span class="hint">Empty: add patterns to arrange a song.</span>';
+  // Arrangement
+  playlist.set(p, { patternId: ui.patternId, start: ui.songStart });
+}
+
+/** For "Hide unused": channels with steps, notes or automation in this pattern (plus the ones I have open). */
+function usedIn(pattern) {
+  const used = new Set([ui.rollChannel, channelPanel.channelId, autoPanel.channelId, ui.focusChannel]);
+  for (const k of pattern.steps.keys()) used.add(k.slice(0, k.lastIndexOf(':')));
+  for (const n of pattern.notes) used.add(n.ch);
+  for (const l of pattern.lanes) if (l.points.length) used.add(l.ch);
+  return used;
 }
 
 function setValue(input, value) {
@@ -513,14 +540,15 @@ function selectPattern(id) {
 // The playhead runs every frame, independent of edits.
 function loop() {
   const pos = engine.position();
-  if (pos && ui.mode === 'song' && pos.patternId !== ui.patternId) selectPattern(pos.patternId);
-  const step = pos && pos.patternId === ui.patternId ? pos.step : -1;
+  // The pattern I'm looking at shows its playhead when it's playing (in any clip).
+  const step = pos?.active.find((a) => a.patternId === ui.patternId)?.step ?? -1;
   rack.setNow(step);
   roll.setPlayStep(step);
   autoPanel.setPlayStep(step);
+  playlist.setPlayStep(pos?.songStep ?? -1);
   autoPanel.draw();
-  for (const c of document.querySelectorAll('.song-chip')) c.classList.toggle('now', !!pos && ui.mode === 'song' && +c.dataset.index === pos.songIndex);
   roll.draw();
+  playlist.draw();
   requestAnimationFrame(loop);
 }
 
@@ -551,7 +579,7 @@ provider.once('sync', () => {
 
 async function togglePlay() {
   if (engine.playing) engine.stop();
-  else await engine.play({ mode: ui.mode, patternId: ui.patternId });
+  else await engine.play({ mode: ui.mode, patternId: ui.patternId, from: ui.songStart });
   document.body.classList.toggle('playing', engine.playing);
 }
 
@@ -560,7 +588,7 @@ for (const b of document.querySelectorAll('[data-mode]')) {
   b.onclick = () => {
     ui.mode = b.dataset.mode;
     engine.mode = ui.mode;
-    if (engine.playing) engine.play({ mode: ui.mode, patternId: ui.patternId });
+    if (engine.playing) engine.play({ mode: ui.mode, patternId: ui.patternId, from: ui.songStart });
     render();
   };
 }
@@ -574,11 +602,24 @@ $('deletePattern').onclick = () => {
   const pt = currentPattern();
   if (confirm(`Delete "${pt.name}" for everyone?`)) S.removePattern(doc, pt.id);
 };
-$('bars').onchange = (e) => S.setPattern(doc, ui.patternId, { bars: +e.target.value });
-$('songAdd').onclick = () => S.songAppend(doc, ui.patternId);
+$('bars').onchange = (e) => {
+  const bars = Math.round(+e.target.value);
+  if (bars >= 1 && bars <= S.MAX_BARS) S.setPattern(doc, ui.patternId, { bars });
+  render();
+};
+$('songAdd').onclick = () => S.appendClip(doc, ui.patternId);
 $('rollClose').onclick = closeRoll;
 $('rollLyrics').onclick = () => {
-  roll.setLyricMode(!roll.lyricMode);
+  roll.setMode(roll.mode === 'lyrics' ? 'notes' : 'lyrics');
+  render();
+};
+$('rollSlide').onclick = () => {
+  roll.setMode(roll.mode === 'slide' ? 'notes' : 'slide');
+  render();
+};
+$('hideUnused').checked = store.get('coprod:hideUnused') === '1';
+$('hideUnused').onchange = () => {
+  store.set('coprod:hideUnused', $('hideUnused').checked ? '1' : '0');
   render();
 };
 
@@ -612,16 +653,16 @@ $('addChannel').onchange = (e) => {
 function exportSummary() {
   const p = ui.project;
   const what = $('exWhat').value;
-  const pats = what === 'song' ? p.song.map((id) => p.patterns.find((x) => x.id === id)).filter(Boolean) : Array(+$('exLoops').value).fill(currentPattern());
-  const bars = pats.reduce((n, x) => n + x.bars, 0);
-  const secs = (bars * 16 * 60) / p.bpm / 4 + +$('exTail').value;
+  const steps = what === 'song' ? S.songLength(p) : +$('exLoops').value * currentPattern().bars * S.STEPS_PER_BAR;
+  const bars = Math.ceil(steps / S.STEPS_PER_BAR);
+  const secs = (steps * 60) / p.bpm / 4 + +$('exTail').value;
   $('exInfo').textContent = `${bars} bar${bars === 1 ? '' : 's'} at ${p.bpm} BPM ≈ ${secs.toFixed(1)} s. Mutes and your solos apply.`;
   $('exLoopsRow').hidden = what === 'song';
 }
 
 $('exportBtn').onclick = () => {
   const songOpt = $('exWhat').options[0];
-  songOpt.disabled = !ui.project.song.length;
+  songOpt.disabled = !ui.project.clips.length;
   if (songOpt.disabled) $('exWhat').value = 'pattern';
   exportSummary();
   $('exGo').disabled = false;
@@ -668,6 +709,13 @@ $('share').onclick = async () => {
 
 window.addEventListener('keydown', (e) => {
   const typing = /INPUT|SELECT|TEXTAREA/.test(document.activeElement?.tagName) && document.activeElement.type !== 'range';
+  // Selection shortcuts (Delete, Ctrl+C/X/V/A/B, Esc) for the editor in use.
+  const editor = { roll: ui.rollChannel && roll, auto: autoPanel.channelId && autoPanel, playlist }[ui.active];
+  if (editor && !typing && editor.key(e)) {
+    e.preventDefault();
+    render();
+    return;
+  }
   if (e.code === 'Space' && !typing) {
     e.preventDefault();
     togglePlay();
@@ -751,4 +799,4 @@ welcome();
 requestAnimationFrame(loop);
 
 // Handy for debugging and for the end-to-end test.
-window.coprod = { doc, provider, engine, ui, S, channelPanel, autoPanel };
+window.coprod = { doc, provider, engine, ui, S, channelPanel, autoPanel, roll, playlist };

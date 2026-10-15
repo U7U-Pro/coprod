@@ -193,6 +193,7 @@ class Voice {
     this.vel = 0;
     this.age = 0;
     this.pitch = 60; // current (gliding) pitch
+    this.slide = 0; // semitones, from the note's own pitch slide (coprod)
     this.sustained = false;
     this.rand = 0;
     this.envs = [new Env(), new Env(), new Env()];
@@ -307,6 +308,7 @@ export class VertexEngine {
       voice.vel = v;
       voice.gate = true;
       voice.sustained = false;
+      voice.slide = 0;
       if (!(legato && wasGated)) this.trigger(voice, note, v, glide > 0 ? voice.active ? voice.pitch : prevPitch : note);
       return;
     }
@@ -324,6 +326,7 @@ export class VertexEngine {
     best.vel = v;
     best.gate = true;
     best.sustained = false;
+    best.slide = 0;
     this.trigger(best, note, v, glide > 0 ? prevPitch : note);
   }
 
@@ -386,6 +389,11 @@ export class VertexEngine {
       for (const v of this.voices) if (v.active) this.release(v);
       if (num === 120) for (const v of this.voices) v.active = false;
     }
+  }
+
+  /** One note's pitch slide (cents), from coprod's per-note pitch messages. */
+  notePitch(note, cents) {
+    for (const v of this.voices) if (v.active && v.gate && v.note === note) v.slide = cents / 100;
   }
 
   pitchBend(v14) {
@@ -484,7 +492,7 @@ export class VertexEngine {
     const glide = map(I.glide, p[I.glide]);
     if (glide > 0) v.pitch += (v.note - v.pitch) * (1 - Math.exp(-dt / (glide / 4)));
     else v.pitch = v.note;
-    const pitch = v.pitch + this.bendValue * map(I.bend, p[I.bend]);
+    const pitch = v.pitch + v.slide + this.bendValue * map(I.bend, p[I.bend]);
 
     // oscillator setup for this block
     const oscOn = [false, false];

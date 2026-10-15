@@ -1,8 +1,12 @@
 // Automation lanes for one channel in the current pattern: volume, pan, and
 // any parameter of the channel's plugin instrument or plugin effects.
 // Points live in the shared project, so everyone sees (and hears) them.
+// Ctrl+drag selects points with a box (Ctrl+click adds/removes one); dragging
+// a selected point moves them all; Delete, Ctrl+C/X/V (paste into any lane,
+// any pattern), Ctrl+A, Ctrl+B (duplicate after), Esc.
 
 import { STEPS_PER_BAR, BEND_RANGES, CURVES, curveShape, curveCount, segmentAt, laneValueAt } from './shared/schema.js';
+import { clipboard, shortcut, box } from './clipboard.js';
 
 const HEIGHT = 150;
 const PAD = 8;
@@ -25,6 +29,9 @@ export class AutomationPanel {
     this.project = null;
     this.playStep = -1;
     this.drag = null;
+    this.sel = new Set(); // selected point ids in the shown lane (mine only)
+    this.selKey = '';
+    this.marquee = null;
     this.infoCache = new Map(); // slot key -> Promise<param info>
     this.dirty = true;
 
@@ -111,6 +118,12 @@ export class AutomationPanel {
     if (!c) return this.close();
     const lanes = this.lanes();
     if (!lanes.some((l) => l.id === this.laneId)) this.laneId = lanes[0]?.id ?? null;
+    // The selection belongs to one lane in one pattern.
+    const selKey = `${pattern.id}|${this.laneId}`;
+    if (selKey !== this.selKey) this.sel.clear();
+    this.selKey = selKey;
+    const present = new Set(this.lane()?.points.map((p) => p.id) ?? []);
+    for (const id of this.sel) if (!present.has(id)) this.sel.delete(id);
     this.title.textContent = `Automation · ${c.name} · ${pattern.name}`;
     this.swatch.style.background = c.color;
     this.tabs.replaceChildren(
@@ -237,19 +250,39 @@ export class AutomationPanel {
     if (e.pointerType === 'touch') {
       this.press = { x: e.clientX, y: e.clientY, timer: setTimeout(() => this.longPress(e), 500) };
     }
+    const hit = this.hit(pos);
+    if (e.ctrlKey || e.metaKey) {
+      if (hit) {
+        if (this.sel.has(hit.id)) this.sel.delete(hit.id);
+        else this.sel.add(hit.id);
+      } else this.marquee = { a: pos, b: pos, add: e.shiftKey };
+      this.dirty = true;
+      return;
+    }
     const handle = this.handles().find((h) => Math.hypot(h.x - pos.x, h.y - pos.y) < 8);
     if (handle) {
       this.drag = { tension: handle, y: e.clientY, t: handle.point.t ?? 0 };
       return;
     }
-    const hit = this.hit(pos);
-    if (hit) this.drag = { id: hit.id };
-    else if (e.pointerType === 'touch') this.drag = { pending: pos }; // add on tap/drag, not on long-press
-    else this.drag = { id: this.actions.setPoint(this.laneId, null, { s: pos.s, v: pos.v }) };
+    if (hit) {
+      if (!this.sel.has(hit.id)) this.sel.clear();
+      const group = this.sel.size ? this.lane().points.filter((p) => this.sel.has(p.id)) : [hit];
+      this.drag = { id: hit.id, origin: pos, group: group.map(({ id, s, v }) => ({ id, s, v })) };
+    } else {
+      this.sel.clear();
+      if (e.pointerType === 'touch') this.drag = { pending: pos }; // add on tap/drag, not on long-press
+      else this.drag = { id: this.actions.setPoint(this.laneId, null, { s: pos.s, v: pos.v }) };
+    }
+    this.dirty = true;
   }
 
   move(e) {
     if (this.press && Math.hypot(e.clientX - this.press.x, e.clientY - this.press.y) > 8) this.cancelPress();
+    if (this.marquee) {
+      this.marquee.b = this.at(e);
+      this.dirty = true;
+      return;
+    }
     const d = this.drag;
     if (!d) return;
     if (d.tension) {
@@ -266,10 +299,28 @@ export class AutomationPanel {
       delete d.pending;
     }
     const pos = this.at(e);
+    if (d.group?.length > 1) {
+      // Move the whole selection by the same amount, keeping it on the lane.
+      const ds = Math.max(pos.s - d.origin.s, -Math.min(...d.group.map((p) => p.s)));
+      const lo = Math.min(...d.group.map((p) => p.v));
+      const hi = Math.max(...d.group.map((p) => p.v));
+      const dv = Math.min(1 - hi, Math.max(-lo, pos.v - d.origin.v));
+      this.actions.updatePoints(this.laneId, d.group.map((p) => ({ id: p.id, s: p.s + ds, v: p.v + dv })));
+      return;
+    }
     this.actions.setPoint(this.laneId, d.id, { s: pos.s, v: pos.v });
   }
 
   up() {
+    if (this.marquee) {
+      const m = this.marquee;
+      this.marquee = null;
+      const r = box({ x: m.a.s, y: m.a.v }, { x: m.b.s, y: m.b.v });
+      if (!m.add) this.sel.clear();
+      for (const p of this.lane()?.points ?? []) if (p.s >= r.x0 && p.s <= r.x1 && p.v >= r.y0 && p.v <= r.y1) this.sel.add(p.id);
+      this.dirty = true;
+      return;
+    }
     if (this.drag?.pending) this.actions.setPoint(this.laneId, null, { s: this.drag.pending.s, v: this.drag.pending.v });
     this.cancelPress();
     this.drag = null;
@@ -367,6 +418,51 @@ export class AutomationPanel {
     if (hit) this.actions.removePoint(this.laneId, hit.id);
   }
 
+  /** Keyboard shortcuts while this panel is in use. Returns true if handled. */
+  key(e) {
+    const lane = this.lane();
+    if (!lane) return false;
+    const del = e.key === 'Delete' || e.key === 'Backspace';
+    if (e.key === 'Escape') {
+      if (!this.sel.size) return false;
+      this.sel.clear();
+      this.dirty = true;
+      return true;
+    }
+    if (shortcut(e, 'a')) {
+      for (const p of lane.points) this.sel.add(p.id);
+      this.dirty = true;
+      return true;
+    }
+    if (shortcut(e, 'v')) {
+      const items = clipboard.get('points');
+      if (items?.length) {
+        this.actions.beginGesture();
+        this.sel = new Set(this.actions.pastePoints(this.laneId, items));
+        this.dirty = true;
+      }
+      return true;
+    }
+    const group = lane.points.filter((p) => this.sel.has(p.id));
+    if (!group.length) return del || shortcut(e, 'c') || shortcut(e, 'x') || shortcut(e, 'b');
+    const items = group.map(({ s, v, c, t }) => ({ s, v, c, t }));
+    if (shortcut(e, 'c')) clipboard.set('points', items);
+    else if (shortcut(e, 'x') || del) {
+      if (!del) clipboard.set('points', items);
+      this.actions.beginGesture();
+      this.actions.removePoints(this.laneId, group.map((p) => p.id));
+      this.sel.clear();
+    } else if (shortcut(e, 'b')) {
+      const start = Math.min(...items.map((p) => p.s));
+      const span = Math.max(...items.map((p) => p.s)) - start;
+      const shift = Math.max(4, Math.ceil(span / 4 + 1e-9) * 4);
+      this.actions.beginGesture();
+      this.sel = new Set(this.actions.pastePoints(this.laneId, items.map((p) => ({ ...p, s: p.s + shift }))));
+    } else return false;
+    this.dirty = true;
+    return true;
+  }
+
   setPlayStep(step) {
     if (step !== this.playStep) {
       this.playStep = step;
@@ -430,11 +526,17 @@ export class AutomationPanel {
         g.fillStyle = `${color}22`;
         g.fill();
         this.curve(g, lane.points, W, Y, color, 2);
-        g.fillStyle = '#fff';
         for (const p of lane.points) {
+          const on = this.sel.has(p.id);
+          g.fillStyle = on ? color : '#fff';
           g.beginPath();
-          g.arc(p.s * cw, Y(p.v), 4, 0, Math.PI * 2);
+          g.arc(p.s * cw, Y(p.v), on ? 5.5 : 4, 0, Math.PI * 2);
           g.fill();
+          if (on) {
+            g.strokeStyle = '#fff';
+            g.lineWidth = 2;
+            g.stroke();
+          }
         }
         // tension handles
         g.lineWidth = 1.5;
@@ -451,6 +553,15 @@ export class AutomationPanel {
         g.font = '12px Inter, system-ui, sans-serif';
         g.fillText('Click to add the first point', 12, HEIGHT / 2 - 8);
       }
+    }
+    if (this.marquee) {
+      const m = this.marquee;
+      const r = box({ x: m.a.x, y: m.a.y }, { x: m.b.x, y: m.b.y });
+      g.fillStyle = 'rgba(255,255,255,0.08)';
+      g.fillRect(r.x0, r.y0, r.x1 - r.x0, r.y1 - r.y0);
+      g.strokeStyle = 'rgba(255,255,255,0.7)';
+      g.lineWidth = 1;
+      g.strokeRect(r.x0 + 0.5, r.y0 + 0.5, r.x1 - r.x0, r.y1 - r.y0);
     }
     if (this.playStep >= 0) {
       g.fillStyle = '#fff';
