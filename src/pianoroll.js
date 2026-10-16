@@ -13,6 +13,7 @@
 // pitch over its length, Ableton-style).
 // There's always one empty bar after the pattern: writing there makes it longer.
 
+import { shortName } from './ui.js';
 import { MIN_PITCH, MAX_PITCH, STEPS_PER_BAR, MAX_BARS, TICKS, SLIDE_RANGE, tick, slideAt } from './shared/schema.js';
 import { clipboard, shortcut, box, simplify } from './clipboard.js';
 
@@ -717,7 +718,7 @@ export class PianoRoll {
       g.closePath();
       g.fill();
       g.font = '600 11px Inter, system-ui, sans-serif';
-      const label = s.user.name;
+      const label = shortName(s.user.name);
       const tw = g.measureText(label).width;
       roundRect(g, x + 10, y + 5, tw + 10, 16, 4);
       g.fill();

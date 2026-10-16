@@ -1,4 +1,6 @@
-// Serves the built app (dist/) and the real-time sync endpoint at /ws/<room>.
+// Serves the built app (dist/), the API (/api, see api.js), the real-time
+// sync endpoint at /ws/<room> and the notification socket at /live. Both
+// sockets need a signed-in session.
 
 import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
@@ -7,7 +9,10 @@ import { extname, join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
 import { RoomManager, ROOM_NAME } from './rooms.js';
-import { SampleStore, readBody, MAX_SAMPLE_BYTES } from './samples.js';
+import { SampleStore } from './samples.js';
+import { Db } from './db.js';
+import { createApi } from './api.js';
+import { sameOrigin } from './auth.js';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const DIST = join(ROOT, 'dist');
@@ -29,29 +34,25 @@ function json(res, status, body) {
 }
 
 /**
- * @param {{ port?: number, dataDir?: string|null }} opts  dataDir holds rooms/ and
- *   samples/. null keeps rooms in memory only (tests) and samples in a temp dir.
+ * @param {{ port?: number, dataDir?: string|null, roomOptions?: object }} opts  dataDir
+ *   holds coprod.json (accounts), rooms/ and samples/. null keeps accounts and rooms
+ *   in memory only (tests) and samples in a temp dir. roomOptions go to RoomManager.
  */
-export function startServer({ port = PORT, dataDir = process.env.COPROD_DATA ?? join(ROOT, 'data') } = {}) {
-  const rooms = new RoomManager({ dataDir: dataDir && join(dataDir, 'rooms') });
+export async function startServer({ port = PORT, dataDir = process.env.COPROD_DATA ?? join(ROOT, 'data'), roomOptions = {} } = {}) {
+  const db = await Db.open(dataDir && join(dataDir, 'coprod.json'));
+  const rooms = new RoomManager({ dataDir: dataDir && join(dataDir, 'rooms'), ...roomOptions });
   const samples = new SampleStore(join(dataDir ?? join(tmpdir(), 'coprod-samples'), 'samples'));
+  const api = createApi({ db, rooms, samples });
 
   const server = createServer(async (req, res) => {
-    const path = decodeURIComponent(new URL(req.url, 'http://x').pathname);
-    if (path === '/healthz') return res.end('ok');
-
-    if (path === '/api/samples' && req.method === 'POST') {
-      try {
-        const ip = req.socket.remoteAddress;
-        if (!samples.allow(ip, Number(req.headers['content-length']) || 0)) {
-          return json(res, 429, { error: 'Too many uploads, try again in a few minutes' });
-        }
-        const body = await readBody(req, MAX_SAMPLE_BYTES);
-        return json(res, 200, await samples.put(body));
-      } catch (err) {
-        return json(res, err.status ?? 500, { error: err.status ? err.message : 'Upload failed' });
-      }
+    let path;
+    try {
+      path = decodeURIComponent(new URL(req.url, 'http://x').pathname);
+    } catch {
+      return json(res, 400, { error: 'Bad URL' }); // e.g. a stray "%" (decoding it would throw)
     }
+    if (path === '/healthz') return res.end('ok');
+    if (path.startsWith('/api/')) return api.handle(req, res, path);
 
     const sample = path.match(/^\/samples\/([a-f0-9]{64})$/);
     if (sample) {
@@ -93,24 +94,29 @@ export function startServer({ port = PORT, dataDir = process.env.COPROD_DATA ?? 
 
   const wss = new WebSocketServer({ noServer: true, maxPayload: 2 * 1024 * 1024 });
   server.on('upgrade', (req, socket, head) => {
-    const m = new URL(req.url, 'http://x').pathname.match(/^\/ws\/(.+)$/);
-    if (!m || !ROOM_NAME.test(m[1])) return socket.destroy();
-    wss.handleUpgrade(req, socket, head, (ws) => rooms.connect(ws, m[1]));
+    const refuse = (status) => socket.end(`HTTP/1.1 ${status}\r\nConnection: close\r\n\r\n`);
+    const path = new URL(req.url, 'http://x').pathname;
+    const m = path.match(/^\/ws\/(.+)$/);
+    if (path !== '/live' && (!m || !ROOM_NAME.test(m[1]))) return socket.destroy();
+    if (!sameOrigin(req)) return refuse('403 Forbidden'); // another site's page can't open your rooms
+    const user = api.userOf(req);
+    if (!user) return refuse('401 Unauthorized');
+    wss.handleUpgrade(req, socket, head, (ws) => (m ? rooms.connect(ws, m[1], user) : api.addLive(ws, user)));
   });
 
-  return new Promise((resolve) =>
-    server.listen(port, () =>
-      resolve({
-        port: server.address().port,
-        rooms,
-        async close() {
-          for (const ws of wss.clients) ws.terminate();
-          await rooms.closeAll();
-          await new Promise((r) => server.close(r));
-        },
-      }),
-    ),
-  );
+  await new Promise((resolve) => server.listen(port, resolve));
+  return {
+    port: server.address().port,
+    rooms,
+    db,
+    async close() {
+      for (const ws of wss.clients) ws.terminate();
+      api.close();
+      await rooms.closeAll();
+      await db.flush();
+      await new Promise((r) => server.close(r));
+    },
+  };
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {

@@ -33,6 +33,7 @@
 // simply keeps one of the two values.
 
 import * as Y from 'yjs';
+import { COLORS } from './colors.js';
 
 export const SCHEMA_VERSION = 1;
 export const STEPS_PER_BAR = 16;
@@ -117,7 +118,7 @@ function childMap(parent, field) {
   return parent.get(field);
 }
 
-export const COLORS = ['#ff8a3d', '#ffd23f', '#5ce1a3', '#3ad5ff', '#8f7bff', '#ff5fa2', '#ff6b6b', '#b8f35d'];
+export { COLORS };
 
 export const isSynth = (inst) => INSTRUMENTS[inst]?.kind === 'synth';
 

@@ -11,8 +11,63 @@
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500&display=swap" rel="stylesheet" />
   </head>
   <body>
+    <div id="authScreen" class="screen auth-screen" hidden>
+      <form class="card auth-card" id="authForm" novalidate>
+        <h1>co<b>prod</b></h1>
+        <p id="authLead">Make beats together, live, in your browser.</p>
+        <div class="seg auth-tabs" id="authTabs" role="tablist" aria-label="Sign in or create an account">
+          <button type="button" role="tab" data-tab="login" class="on">Sign in</button>
+          <button type="button" role="tab" data-tab="signup">Create account</button>
+        </div>
+        <label data-for="signup" hidden>Your name
+          <input id="authName" maxlength="32" autocomplete="name" placeholder="What people see, e.g. Ana Lucía" />
+        </label>
+        <label data-for="signup" hidden>Username
+          <span class="at-input"><span aria-hidden="true">@</span><input id="authUsername" maxlength="20" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="ana_beats" /></span>
+          <span class="hint">How friends find you. Letters, numbers and _.</span>
+        </label>
+        <label>Email <input id="authEmail" type="email" autocomplete="username" inputmode="email" autocapitalize="off" spellcheck="false" /></label>
+        <label>Password <input id="authPassword" type="password" autocomplete="current-password" /></label>
+        <div data-for="signup" hidden>
+          <span class="field-label">Your color</span>
+          <div id="authColors" class="colors" role="radiogroup" aria-label="Your color"></div>
+        </div>
+        <p class="form-error" id="authError" role="alert" hidden></p>
+        <button class="primary" id="authGo">Sign in</button>
+      </form>
+    </div>
+
+    <div id="homeScreen" class="screen home-screen" hidden>
+      <header class="top">
+        <a class="brand" href="/">co<b>prod</b></a>
+        <div class="home-actions">
+          <button id="homeOpen" class="ghost" title="Open a .copr project file (or drop one on this page)">Open .copr…</button>
+          <button id="homeNew" class="share">+ New project</button>
+        </div>
+        <button id="homeMe" class="me-button" aria-label="Your profile"></button>
+      </header>
+      <div class="home-body">
+        <section class="home-projects" aria-labelledby="projectsHead">
+          <div class="home-head"><h2 id="projectsHead">Your projects</h2><span class="hint" id="homeCount"></span></div>
+          <div id="projectList" class="project-grid"><p class="hint">Loading…</p></div>
+        </section>
+        <aside class="home-friends" aria-labelledby="friendsHead">
+          <div class="home-head"><h2 id="friendsHead">Friends</h2><span class="hint" id="friendCount"></span></div>
+          <div class="friend-add">
+            <input id="friendSearch" type="search" placeholder="Add a friend: @username or email" autocomplete="off" aria-label="Find people" />
+            <div id="friendResults" class="friend-results" hidden></div>
+          </div>
+          <div id="friendRequests"></div>
+          <div id="friendList" class="friend-list"></div>
+          <div id="friendSent"></div>
+        </aside>
+      </div>
+      <div class="home-drop">Drop a .copr file to open it</div>
+    </div>
+
+    <div id="roomScreen" class="screen room-screen" hidden>
     <header class="top">
-      <a class="brand" href="/" title="Start a new project">co<b>prod</b></a>
+      <a class="brand" href="/" title="Your projects">co<b>prod</b></a>
       <input id="title" class="title" maxlength="60" aria-label="Project title" />
       <div class="transport">
         <button id="play" class="play" title="Play / stop (Space)" aria-label="Play">
@@ -30,9 +85,14 @@
         <button id="redo" title="Redo (Ctrl+Shift+Z)" aria-label="Redo">↷</button>
       </div>
       <div id="people" class="people" aria-label="People here"></div>
-      <button id="exportBtn" class="ghost" title="Render to a WAV file">Export</button>
+      <button id="chatBtn" class="ghost chat-btn" title="Chat with everyone here" aria-expanded="false">Chat<span id="chatBadge" class="badge" hidden></span></button>
+      <button id="exportBtn" class="ghost" title="Download a .copr project file or render a WAV">Export</button>
       <button id="share" class="share">Invite</button>
     </header>
+    <div id="followBar" class="follow-bar" hidden>
+      <span class="face-slot"></span><span>Following <b id="followName"></b>: you see what they see</span>
+      <button id="followStop" class="ghost small">Stop</button>
+    </div>
 
     <nav class="patterns">
       <div id="patternTabs" class="tabs"></div>
@@ -108,18 +168,32 @@
       </section>
     </main>
 
-    <div id="welcome" class="modal" hidden>
-      <form class="card" id="welcomeForm">
-        <h1>co<b>prod</b></h1>
-        <p>Make a beat together, live. Everyone with the link edits the same project and hears it in sync.</p>
-        <label>Your name<input id="nameInput" maxlength="20" autocomplete="nickname" required /></label>
-        <div id="colorPick" class="colors" role="radiogroup" aria-label="Your color"></div>
-        <button class="primary">Start jamming</button>
+    <aside id="chatPanel" class="chat-panel" hidden aria-label="Chat">
+      <header>
+        <h2>Chat</h2>
+        <span class="hint" id="chatWho"></span>
+        <button class="ghost small" id="chatClose" aria-label="Close chat">✕</button>
+      </header>
+      <div id="chatLog" class="chat-log" aria-live="polite"></div>
+      <div id="chatTyping" class="chat-typing hint"></div>
+      <form id="chatForm" class="chat-form">
+        <textarea id="chatInput" rows="1" maxlength="1000" placeholder="Message everyone here…" aria-label="Message"></textarea>
+        <button class="primary" aria-label="Send">Send</button>
       </form>
+    </aside>
     </div>
+
     <div id="exportModal" class="modal" hidden>
       <form class="card" id="exportForm">
-        <h2>Export WAV</h2>
+        <h2>Export</h2>
+        <div class="export-copr">
+          <div>
+            <b>Project file (.copr)</b>
+            <p class="hint">Everything in this project, samples included. Keep it as a backup, or share it: open it from your projects page to get your own copy.</p>
+          </div>
+          <button type="button" class="ghost" id="exCopr">Download .copr</button>
+        </div>
+        <h3 class="picker-group">Audio (WAV)</h3>
         <label>What to export
           <select id="exWhat">
             <option value="song">The song (patterns in the Song strip)</option>
@@ -149,7 +223,7 @@
           </select>
         </label>
         <p class="hint" id="exInfo"></p>
-        <button class="primary" id="exGo">Export</button>
+        <button class="primary" id="exGo">Export WAV</button>
         <button type="button" class="ghost" id="exCancel">Cancel</button>
       </form>
     </div>
@@ -191,11 +265,53 @@
         <button class="ghost" type="button" id="pickerCancel">Cancel</button>
       </form>
     </div>
+    <div id="inviteModal" class="modal" hidden>
+      <div class="card invite-card" role="dialog" aria-labelledby="inviteHead">
+        <h2 id="inviteHead">Invite people</h2>
+        <p>Anyone signed in to coprod with this link can join and edit.</p>
+        <div class="invite-link">
+          <input id="inviteLink" readonly aria-label="Link to this session" />
+          <button type="button" class="primary small" id="inviteCopy">Copy link</button>
+        </div>
+        <h3 class="picker-group">Your friends</h3>
+        <div id="inviteFriends" class="friend-list picker-scroll"></div>
+        <button type="button" class="ghost" id="inviteClose">Done</button>
+      </div>
+    </div>
+
+    <div id="profileModal" class="modal" hidden>
+      <form class="card" id="profileForm">
+        <h2>Your profile</h2>
+        <label>Name <input id="pfName" maxlength="32" autocomplete="name" /></label>
+        <label>Username
+          <span class="at-input"><span aria-hidden="true">@</span><input id="pfUsername" maxlength="20" autocomplete="off" autocapitalize="off" spellcheck="false" /></span>
+        </label>
+        <label>About you <textarea id="pfBio" maxlength="160" rows="3" placeholder="What you make, what you're into…"></textarea></label>
+        <div><span class="field-label">Your color</span><div id="pfColors" class="colors" role="radiogroup" aria-label="Your color"></div></div>
+        <p class="form-error" id="pfError" role="alert" hidden></p>
+        <div class="form-actions">
+          <button class="primary">Save</button>
+          <button type="button" class="ghost" id="pfCancel">Cancel</button>
+        </div>
+        <details>
+          <summary>Change password</summary>
+          <label>Current password <input id="pfCurrent" type="password" autocomplete="current-password" /></label>
+          <label>New password <input id="pfNew" type="password" autocomplete="new-password" placeholder="At least 8 characters" /></label>
+          <p class="form-error" id="pfPassError" role="alert" hidden></p>
+          <button type="button" class="ghost" id="pfPassGo">Change password</button>
+        </details>
+        <p class="hint">Signed in as <span id="pfEmail"></span> · <button type="button" class="linklike" id="pfSignOut">Sign out</button></p>
+      </form>
+    </div>
+
+    <div id="profileCard" class="profile-card" role="dialog" aria-label="Profile" hidden></div>
+    <div id="notices" class="notices" aria-live="polite"></div>
+    <input id="coprInput" type="file" accept=".copr" hidden />
     <input id="fileInput" type="file" accept="audio/*,.wav,.mp3,.ogg,.flac,.m4a" multiple hidden />
     <div id="dropHint" class="drop-hint">Drop audio files: on a channel to replace its sound, anywhere else for new channels</div>
-    <div id="status" class="status">Connecting…</div>
+    <div id="status" class="status"></div>
     <div id="toast" role="status"></div>
 
-    <script type="module" src="/src/main.js"></script>
+    <script type="module" src="/src/app.js"></script>
   </body>
 </html>

@@ -1,7 +1,14 @@
-import './style.css';
+// A session: one shared project, edited live by everyone in the room.
+// Loaded by app.js once someone is signed in and the URL names a room.
+
 import * as Y from 'yjs';
 import { WebsocketProvider } from 'y-websocket';
 import * as S from './shared/schema.js';
+import { api, live, session, exportCopr, importCopr } from './api.js';
+import { el, face, initial, toast, timeAgo, saveBlob } from './ui.js';
+import { goToRoom } from './nav.js';
+import { Chat } from './chat.js';
+import { openProfile, onProfileSaved } from './profile.js';
 import { Engine } from './audio.js';
 import { Rack } from './rack.js';
 import { PianoRoll } from './pianoroll.js';
@@ -26,6 +33,10 @@ function roomFromUrl() {
 }
 
 const room = roomFromUrl();
+document.body.classList.add('in-room');
+$('roomScreen').hidden = false;
+$('status').textContent = 'Connecting…';
+$('status').classList.add('show');
 const doc = new Y.Doc();
 const provider = new WebsocketProvider(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`, room, doc);
 const awareness = provider.awareness;
@@ -41,6 +52,7 @@ const ui = {
   mode: 'pattern',
   songStart: 0, // song step Song mode plays from (mine)
   active: null, // the editor keyboard shortcuts go to: 'roll' | 'auto' | 'playlist'
+  following: null, // user id whose view mine follows
 };
 
 // ------------------------------------------------------------------ me
@@ -60,17 +72,21 @@ const store = {
   },
 };
 
-const me = {
-  name: store.get('coprod:name') ?? '',
-  color: store.get('coprod:color') ?? S.COLORS[Math.floor(Math.random() * S.COLORS.length)],
-};
+// Who I am comes from my account (the server shows everyone else the same).
+const me = session.user;
+const badge = () => ({ id: me.id, name: me.name, username: me.username, color: me.color });
+onProfileSaved(() => {
+  publishPresence();
+  render();
+});
 
 function publishPresence(extra = {}) {
   awareness.setLocalState({
     ...(awareness.getLocalState() ?? {}),
-    user: { name: me.name || 'Guest', color: me.color },
+    user: badge(),
     pattern: ui.patternId,
     channel: ui.focusChannel,
+    roll: ui.rollChannel, // the piano roll I have open (for people following me)
     ...extra,
   });
 }
@@ -298,6 +314,8 @@ window.addEventListener('drop', (e) => {
   dragDepth = 0;
   document.body.classList.remove('dropping');
   for (const r of document.querySelectorAll('.row.drop')) r.classList.remove('drop');
+  const project = [...e.dataTransfer.files].find((f) => /\.copr$/i.test(f.name));
+  if (project) return openCopr(project);
   const files = [...e.dataTransfer.files].filter((f) => f.type.startsWith('audio/') || /\.(wav|mp3|ogg|flac|m4a)$/i.test(f.name));
   if (!files.length) return toast('Drop audio files (wav, mp3, ogg, flac, m4a)');
   uploadFiles(files, e.target.closest?.('.row')?.dataset.id ?? null);
@@ -408,7 +426,8 @@ function openPlugins({ kind = 'all', channel } = {}) {
 
 function openRoll(id) {
   ui.rollChannel = id;
-  focusChannel(id);
+  ui.focusChannel = id;
+  publishPresence(); // always: people following me open this roll too
   $('rollPanel').hidden = false;
   roll.open(id);
   render();
@@ -446,19 +465,25 @@ function renderNow() {
   $('undo').disabled = undo.undoStack.length === 0;
   $('redo').disabled = undo.redoStack.length === 0;
 
-  // People
-  const people = [{ user: { name: `${me.name || 'You'} (you)`, color: me.color }, pattern: ui.patternId }, ...remote];
+  // People: one avatar per person (someone with two tabs open counts once). Click for their profile.
+  const people = [];
+  for (const s of [{ user: badge(), pattern: ui.patternId }, ...remote]) {
+    if (s.user.id && people.some((x) => x.user.id === s.user.id)) continue;
+    people.push(s);
+  }
   $('people').replaceChildren(
     ...people.map((s) => {
-      const d = document.createElement('span');
-      d.className = 'avatar';
-      d.style.setProperty('--c', s.user.color);
-      d.textContent = (s.user.name || '?').trim().charAt(0).toUpperCase();
+      const mine = s.user.id === me.id;
+      const b = el('button', { type: 'button', class: `avatar${ui.following === s.user.id ? ' followed' : ''}`, style: `--c:${s.user.color}`, dataset: { user: s.user.username ?? '' } }, initial(s.user.name));
       const where = p.patterns.find((x) => x.id === s.pattern)?.name;
-      d.title = `${s.user.name}${where ? ` · on ${where}` : ''}`;
-      return d;
+      b.title = `${s.user.name}${mine ? ' (you)' : ''}${where && !mine ? ` · on ${where}` : ''}`;
+      b.setAttribute('aria-label', `${b.title}: show profile`);
+      b.onclick = () => showPerson(s.user, b);
+      return b;
     }),
   );
+  $('chatWho').textContent = people.length > 1 ? `${people.length} here` : 'Just you so far';
+  updateFollowBar(remote);
 
   // Pattern tabs (with dots for who's on which pattern)
   $('patternTabs').replaceChildren(
@@ -532,6 +557,7 @@ function setValue(input, value) {
 }
 
 function selectPattern(id) {
+  if (ui.following) stopFollowing(); // you went somewhere yourself
   ui.patternId = id;
   publishPresence();
   render();
@@ -561,13 +587,22 @@ doc.on('update', () => {
   if (ui.rollChannel) roll.set(ui.project, currentPattern(), remoteStates());
   render();
 });
-awareness.on('change', render);
+awareness.on('change', () => {
+  followTick();
+  render();
+});
 undo.on('stack-item-added', render);
 undo.on('stack-item-popped', render);
 
+let lastSessionCheck = 0;
 provider.on('status', ({ status }) => {
   $('status').textContent = status === 'connected' ? '' : status === 'connecting' ? 'Connecting…' : 'Offline: edits will sync when you reconnect';
   $('status').classList.toggle('show', status !== 'connected');
+  // The server refuses the socket if the session has ended; find out (this signs you out if so).
+  if (status === 'disconnected' && Date.now() - lastSessionCheck > 10_000) {
+    lastSessionCheck = Date.now();
+    api.get('/api/me').then(({ user }) => !user && session.onSignedOut?.(), () => {});
+  }
 });
 provider.once('sync', () => {
   ui.project = S.readProject(doc);
@@ -695,17 +730,207 @@ $('exportForm').onsubmit = async (e) => {
   }
 };
 
-$('share').onclick = async () => {
+// ------------------------------------------------------------------ people: profiles, following, invites
+
+/** Someone's most recent presence in this room (if they're here). */
+const stateOf = (userId) => remoteStates().find((s) => s.user.id === userId) ?? null;
+
+/** "On Pattern 2, in Bass's piano roll" */
+function whereIs(s) {
+  const pattern = ui.project?.patterns.find((x) => x.id === s.pattern);
+  const roll = channelById(s.roll);
+  const ch = channelById(s.channel);
+  const parts = [];
+  if (pattern) parts.push(`on ${pattern.name}`);
+  if (roll) parts.push(`in ${roll.name}’s piano roll`);
+  else if (ch) parts.push(`working on ${ch.name}`);
+  return `Here now${parts.length ? `, ${parts.join(', ')}` : ''}`;
+}
+
+/** Show what they're looking at: their pattern, and their piano roll if one is open. */
+function goTo(s) {
+  if (s.pattern && s.pattern !== ui.patternId && ui.project.patterns.some((x) => x.id === s.pattern)) {
+    ui.patternId = s.pattern;
+    publishPresence();
+  }
+  const roll = channelById(s.roll);
+  if (roll && S.isSynth(roll.inst)) {
+    if (ui.rollChannel !== roll.id) openRoll(roll.id);
+  } else if (s.channel) {
+    const row = document.querySelector(`.row[data-id="${CSS.escape(s.channel)}"]`);
+    row?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    row?.classList.add('flash');
+    setTimeout(() => row?.classList.remove('flash'), 1200);
+  }
+  render();
+}
+
+let followSeen = null;
+function follow(user) {
+  ui.following = user.id;
+  followSeen = null;
+  followTick();
+  toast(`Following ${user.name}. Pick a pattern yourself (or press Stop) to stop.`);
+  render();
+}
+function stopFollowing() {
+  ui.following = null;
+  render();
+}
+/** While following, move whenever the person I follow does. */
+function followTick() {
+  if (!ui.following) return;
+  const s = stateOf(ui.following);
+  if (!s) {
+    ui.following = null;
+    toast('They left, so you’re not following anyone now');
+    return render();
+  }
+  const key = `${s.pattern}|${s.roll}`;
+  if (key === followSeen) return;
+  followSeen = key;
+  goTo(s);
+}
+function updateFollowBar(remote) {
+  const s = ui.following && remote.find((x) => x.user.id === ui.following);
+  $('followBar').hidden = !s;
+  if (!s) return;
+  $('followName').textContent = s.user.name;
+  $('followBar').querySelector('.face-slot').replaceChildren(face(s.user, { size: 22 }));
+}
+$('followStop').onclick = stopFollowing;
+
+/** A person's profile card, with what you can do with them in a session. */
+function showPerson(user, anchor) {
+  const mine = user.id === me.id;
+  openProfile(user.id, {
+    anchor,
+    user,
+    here: () => {
+      if (mine) return null;
+      const s = stateOf(user.id);
+      return s ? whereIs(s) : null;
+    },
+    actions: () => {
+      if (mine) return [];
+      const here = !!stateOf(user.id);
+      return [
+        here && {
+          label: 'Go to them',
+          title: 'Jump to the pattern and channel they’re on',
+          run: () => {
+            const s = stateOf(user.id);
+            if (s) goTo(s);
+            else toast(`${user.name} isn’t here anymore`);
+          },
+        },
+        here && (ui.following === user.id ? { label: 'Stop following', run: stopFollowing } : { label: 'Follow', title: 'Your view follows theirs as they move around', run: () => follow(user) }),
+        { label: '@ Mention', title: 'Start a chat message to them', run: () => chat.mention(user.username) },
+      ].filter(Boolean);
+    },
+  });
+}
+
+const chat = new Chat(
+  { panel: $('chatPanel'), log: $('chatLog'), form: $('chatForm'), input: $('chatInput'), typing: $('chatTyping'), badge: $('chatBadge') },
+  provider,
+  {
+    me: badge,
+    openProfile: (user, anchor) => showPerson(user, anchor),
+    onToggle: (open) => {
+      $('chatBtn').setAttribute('aria-expanded', String(open));
+      $('chatBtn').classList.toggle('on', open);
+    },
+  },
+);
+$('chatBtn').onclick = () => chat.toggle();
+$('chatClose').onclick = () => chat.close();
+
+async function drawInviteFriends() {
+  const box = $('inviteFriends');
+  const hint = (text) => el('p', { class: 'hint' }, text);
+  try {
+    const { friends } = await api.get('/api/friends');
+    const here = new Set(remoteStates().map((s) => s.user.id));
+    box.replaceChildren(
+      ...(friends.length
+        ? friends.map((f) => {
+            const line = here.has(f.user.id) ? 'Here with you' : f.status === 'session' ? `In “${f.session.title}”` : f.status === 'online' ? 'Online' : f.seen ? `Last seen ${timeAgo(f.seen)}` : 'Offline';
+            const button = el('button', { type: 'button', class: 'primary small', dataset: { invite: f.user.username } }, 'Invite');
+            if (here.has(f.user.id)) Object.assign(button, { disabled: true, textContent: 'Here', className: 'ghost small' });
+            else if (f.status === 'offline') Object.assign(button, { disabled: true, textContent: 'Offline', className: 'ghost small', title: 'Invites reach people who have coprod open. Send them the link instead.' });
+            button.onclick = async () => {
+              button.disabled = true;
+              try {
+                const { delivered } = await api.post('/api/invites', { to: f.user.id, room });
+                button.textContent = delivered ? 'Invited ✓' : 'Not online';
+                if (!delivered) toast(`${f.user.name} just went offline. Send them the link instead.`);
+              } catch (err) {
+                toast(err.message);
+                button.disabled = false;
+              }
+            };
+            return el(
+              'div',
+              { class: 'person' },
+              el('span', { class: 'person-main' }, face(f.user, { size: 32, status: f.status }), el('span', { class: 'person-text' }, el('b', {}, f.user.name), el('span', { class: 'hint' }, line))),
+              button,
+            );
+          })
+        : [hint('No friends yet. Click someone’s picture in a session to add them, or find people by @username on your projects page.')]),
+    );
+  } catch (err) {
+    box.replaceChildren(hint(err.message));
+  }
+}
+live.on('friends', () => !$('inviteModal').hidden && drawInviteFriends());
+
+$('share').onclick = () => {
+  $('inviteLink').value = location.href;
+  $('inviteModal').hidden = false;
+  $('inviteCopy').textContent = 'Copy link';
+  drawInviteFriends();
+};
+$('inviteCopy').onclick = async () => {
   try {
     if (navigator.share && matchMedia('(pointer: coarse)').matches) await navigator.share({ title: 'Jam with me on coprod', url: location.href });
     else {
       await navigator.clipboard.writeText(location.href);
-      toast('Link copied. Anyone with it can join and edit.');
+      $('inviteCopy').textContent = 'Copied ✓';
     }
   } catch {
-    toast(location.href);
+    $('inviteLink').select();
   }
 };
+$('inviteClose').onclick = () => ($('inviteModal').hidden = true);
+
+// ------------------------------------------------------------------ .copr project files
+
+async function saveCopr() {
+  const b = $('exCopr');
+  b.disabled = true;
+  try {
+    if (!provider.synced) toast('Still connecting: the file may miss your latest edits');
+    const { blob, name } = await exportCopr(room);
+    saveBlob(blob, name);
+    toast(`Saved ${name}`);
+  } catch (err) {
+    toast(`Couldn’t save: ${err.message}`);
+  } finally {
+    b.disabled = false;
+  }
+}
+$('exCopr').onclick = saveCopr;
+
+async function openCopr(file) {
+  if (!confirm(`Open “${file.name}” as a new project? (This one stays as it is.)`)) return;
+  toast(`Opening ${file.name}…`);
+  try {
+    goToRoom((await importCopr(file)).id);
+  } catch (err) {
+    toast(err.message);
+  }
+}
 
 window.addEventListener('keydown', (e) => {
   const typing = /INPUT|SELECT|TEXTAREA/.test(document.activeElement?.tagName) && document.activeElement.type !== 'range';
@@ -719,6 +944,11 @@ window.addEventListener('keydown', (e) => {
   if (e.code === 'Space' && !typing) {
     e.preventDefault();
     togglePlay();
+  } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
+    // Everything saves by itself; Ctrl+S gives you a .copr copy instead of the browser's "save page".
+    e.preventDefault();
+    toast('coprod saves as you go. Downloading a .copr copy…');
+    saveCopr();
   } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z' && !typing) {
     e.preventDefault();
     if (e.shiftKey) undo.redo();
@@ -729,51 +959,26 @@ window.addEventListener('keydown', (e) => {
   } else if (e.key === 'Escape') {
     if (!$('picker').hidden) $('picker').hidden = true;
     else if (!$('exportModal').hidden) $('exportModal').hidden = true;
+    else if (!$('inviteModal').hidden) $('inviteModal').hidden = true;
+    else if (!$('profileModal').hidden) $('profileModal').hidden = true;
+    else if (chat.isOpen) chat.close();
+    else if (ui.following) stopFollowing();
     else if (ui.rollChannel) closeRoll();
     else if (channelPanel.channelId) channelPanel.close();
     else if (autoPanel.channelId) autoPanel.close();
   }
 });
 
-// ------------------------------------------------------------------ welcome
+// ------------------------------------------------------------------ audio
 
-function welcome() {
-  $('nameInput').value = me.name;
-  const pick = $('colorPick');
-  for (const c of S.COLORS) {
-    const b = document.createElement('button');
-    b.type = 'button';
-    b.style.background = c;
-    b.setAttribute('role', 'radio');
-    b.setAttribute('aria-label', c);
-    b.className = c === me.color ? 'on' : '';
-    b.onclick = () => {
-      me.color = c;
-      for (const x of pick.children) x.classList.toggle('on', x === b);
-    };
-    pick.append(b);
-  }
-  $('welcome').hidden = false;
-  $('nameInput').focus();
-  $('welcomeForm').onsubmit = (e) => {
-    e.preventDefault();
-    me.name = $('nameInput').value.trim().slice(0, 20) || 'Guest';
-    store.set('coprod:name', me.name);
-    store.set('coprod:color', me.color);
-    $('welcome').hidden = true;
-    engine.ensure(); // this click counts as the gesture that unlocks audio
-    publishPresence();
-    render();
-  };
+// Browsers only start audio after the page has been clicked or typed in. Coming
+// from the projects page (or signing in) counts; otherwise the first click does.
+function unlockAudio() {
+  engine.ensure();
+  for (const t of ['pointerdown', 'keydown']) removeEventListener(t, unlockAudio, true);
 }
-
-let toastTimer;
-function toast(text) {
-  $('toast').textContent = text;
-  $('toast').classList.add('show');
-  clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => $('toast').classList.remove('show'), 2600);
-}
+if (navigator.userActivation?.hasBeenActive) engine.ensure();
+else for (const t of ['pointerdown', 'keydown']) addEventListener(t, unlockAudio, true);
 
 function throttle(fn, ms) {
   let last = 0;
@@ -795,8 +1000,7 @@ function throttle(fn, ms) {
   };
 }
 
-welcome();
 requestAnimationFrame(loop);
 
 // Handy for debugging and for the end-to-end test.
-window.coprod = { doc, provider, engine, ui, S, channelPanel, autoPanel, roll, playlist };
+window.coprod = { doc, provider, engine, ui, S, channelPanel, autoPanel, roll, playlist, chat };

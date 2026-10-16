@@ -12,8 +12,10 @@ npm install
 npm run dev        # http://localhost:5173  (Vite + sync server, hot reload)
 ```
 
-Open the page and you get a fresh room with a starter beat. Press **Invite** and
-send the link; whoever opens it joins the same project.
+Create an account (email and password), then **+ New project** gives you a
+fresh room with a starter beat. Press **Invite** and send the link, or invite a
+friend directly; whoever opens the link signs in (or signs up) and joins the
+same project.
 
 Production:
 
@@ -24,6 +26,37 @@ npm start          # serves dist/ and the sync socket on $PORT (default 3000)
 
 ## What's in the prototype
 
+- **Accounts**: sign in with your email and a password. You pick a display name
+  (shown in full on your profile), a unique **@username** (how friends find
+  you), a color and a short "about you". Sessions last 30 days and renew while
+  you use coprod; changing your password signs you out everywhere else.
+- **Your projects** (the home screen at `/`): every project you've opened, newest
+  first, with who else has worked on it and who's in it right now. Open one,
+  download it as a **.copr** file, copy its invite link, or remove it from your
+  list. **Open .copr…** (or dropping a .copr file on the page) opens a saved
+  project as a new one.
+- **Friends**: find people by @username, name or exact email and send a friend
+  request. Requests, acceptances and invites pop up live on whatever screen
+  you're on. Your friends list shows who's online, who's offline (and when they
+  were last seen), and who's **in a session**, with the project's name, who
+  they're with, and a **Join** button.
+- **In a session**:
+  - **Click anyone's avatar** (top right) for their profile card: full name,
+    @username, about, when they joined, how many projects you've made together,
+    mutual friends, and where they are right now ("on Pattern 2, in Bass's piano
+    roll"). From there: **Add friend** (or accept, cancel, unfriend), **Go to
+    them** (jump to their pattern and piano roll), **Follow** (your view follows
+    theirs as they move around, until you pick a pattern yourself or press Stop),
+    and **@ Mention** (starts a chat message to them). Your own avatar opens
+    yours, with **Edit profile** and **Sign out**.
+  - **Chat** (top bar): one chat per project, kept with it (the last 300
+    messages). @mentions are highlighted and pop up if your chat is closed;
+    there's an unread count, "Ana is typing…", join/leave notices, and links
+    open in a new tab. Click a name for that person's profile.
+  - **Invite** copies the link, and lists your friends with an **Invite** button
+    for each one who's online: they get a pop-up with **Join**.
+  - **Export → Download .copr** saves the whole project as a file (Ctrl+S does
+    too). Everything also saves on the server as you go.
 - **Channel rack**: drum channels with a step grid (click or drag to paint), synth
   channels with a mini preview of their notes. Per-channel volume, pan, mute
   (shared) and solo (just for you). **Hide unused** (just for you) hides channels
@@ -140,7 +173,40 @@ npm start          # serves dist/ and the sync socket on $PORT (default 3000)
   offline (faster than real time) with fresh copies of every plugin, so it sounds
   like playback. Mutes and your solos apply; files start exactly on the beat, so a
   tail-less pattern export loops cleanly.
-- Space plays and stops; Esc closes the piano roll.
+- Space plays and stops; Esc closes the piano roll (or the chat, or stops following).
+
+## Where projects are saved
+
+Every project is saved on the server as you edit, about a second after each
+change: the document is `data/rooms/<id>.ydoc` and its chat is
+`data/rooms/<id>.chat.json`. Accounts, friends and who's been in which project
+(which is what fills your projects list) are in `data/coprod.json`, and uploaded
+samples are in `data/samples/`. Nothing is ever lost by closing the tab: open
+the project again from your projects page.
+
+### .copr project files
+
+A **.copr** file is a whole project in one file, to keep as a backup, move to
+another coprod server, or give to someone. Download one from **Export** in a
+session or from a project's **⋯** menu on the home screen. Opening one (**Open
+.copr…** or drop it on the projects page, or on a session) always makes a **new
+project** owned by you; it never overwrites anything.
+
+It's an ordinary zip archive (rename it to `.zip` to look inside):
+
+```
+manifest.json            format "coprod-project", version, title, tempo, channel and
+                         pattern names, and the list of samples
+project.ydoc             the shared document (Yjs): channels, patterns, notes, plugin
+                         settings, automation, the arrangement
+samples/<sha256>.<ext>   every uploaded sound the project uses, including ones kept in
+                         plugin settings (Slicer's loop, Grains' sound)
+```
+
+Samples are named by the hash of their bytes, so a project opened on another
+server finds its sounds, and opening the same file twice stores them once.
+Files are checked when opened (size limits before unpacking, CRCs, the format
+and version), and anything odd is refused with a message.
 
 ## How it works
 
@@ -153,9 +219,16 @@ audio clock so timing stays tight.
 
 ```
 browser ── edits (Yjs updates) ──► server/rooms.js ──► every other browser in the room
-   │                                     │
-   └─ renders audio locally              └─ saves each room to data/rooms/<room>.ydoc
+   │       + chat (same socket)          │
+   │                                     └─ saves each room to data/rooms/<room>.ydoc
+   ├─ renders audio locally
+   └─ /live socket ◄── server/api.js: friend requests, invites, friends' status
 ```
+
+Both sockets need a signed-in session (an HttpOnly cookie), and the server
+refuses them from other sites' pages. The server also writes each person's name
+into their presence and chat messages from their account, so nobody can appear
+as someone else.
 
 - `src/shared/schema.js`: the document layout and every edit operation (also used
   by the server to seed new rooms). The comments explain why steps are keyed map
@@ -203,6 +276,16 @@ browser ── edits (Yjs updates) ──► server/rooms.js ──► every oth
   `public/wam/dexed/dexed.wasm` with clang's WebAssembly target. **Dexed is GPLv3**:
   if you publish coprod with Dexed in it, publish this folder's source too.
 - `server/samples.js`: sample upload/download, stored by SHA-256 of the file.
+- `server/db.js`: accounts, sign-in sessions, friends and project lists, kept in
+  memory and written to `data/coprod.json` (atomically) after changes.
+- `server/auth.js`: password hashing (scrypt, salted), the session cookie, rate
+  limits, and the rules for emails, usernames and names.
+- `server/api.js`: the `/api` routes and the `/live` socket; friends' presence
+  comes from who's connected to which room.
+- `server/copr.js`: .copr files (a small zip reader and writer on Node's zlib).
+- `src/app.js` (startup and routing), `src/signin.js`, `src/home.js`,
+  `src/profile.js` (profile cards and editing), `src/chat.js`, `src/api.js`
+  (requests and the live socket), `src/ui.js` (shared DOM helpers).
 - `src/instruments.js`: the synthesized instruments.
 - `src/rack.js`, `src/pianoroll.js`, `src/main.js`: the UI.
 - `server/rooms.js`: a small y-websocket-compatible sync server with persistence.
@@ -227,7 +310,8 @@ their knobs yet.
 ## Tests
 
 ```bash
-npm test                      # merge/conflict behavior + server sync & persistence
+npm test                      # merge/conflict behavior, server sync & persistence, accounts,
+                              # friends, chat, .copr files, and the DSP/plugin engines
 npm run build && npm run e2e  # three real browsers editing one room, incl. samples, plugins
                               # and the plugin-safety prompt (needs Chromium;
                               # set CHROMIUM_PATH if Playwright's isn't installed)
@@ -237,14 +321,26 @@ npm run build && npm run e2e  # three real browsers editing one room, incl. samp
 
 Any Node 20+ host with WebSocket support (Render, Railway, Fly.io, a VPS). Build
 command `npm install && npm run build`, start command `npm start`. Point
-`COPROD_DATA` at a persistent disk so rooms (`rooms/`) and uploaded samples
-(`samples/`) survive redeploys. Serve it over HTTPS: browsers only allow the audio
-worklets some plugins use on secure pages (localhost is fine for development).
+`COPROD_DATA` at a persistent disk so accounts (`coprod.json`), rooms (`rooms/`)
+and uploaded samples (`samples/`) survive redeploys, and back that folder up.
+Serve it over HTTPS: browsers only allow the audio worklets some plugins use on
+secure pages (localhost is fine for development), and the session cookie is
+marked Secure there.
+
+Someone forgot their password? Stop the server and run
+`node scripts/reset-password.mjs their@email.com` (with the same `COPROD_DATA`):
+it prints a new password and signs them out everywhere.
 
 ## Known limits (it's a prototype)
 
-- No accounts. Anyone with a room link can edit it, so treat links like a shared
-  Google Doc's "anyone with the link" setting.
+- Rooms are "anyone signed in with the link can edit", like a shared Google Doc's
+  link setting. There are no private rooms, roles or read-only links yet.
+- Accounts don't send email: there's no email verification and no "forgot my
+  password" email (the server owner can reset one, see Deploying). Adding a mail
+  service (Postmark, Resend…) would enable both, plus sign-in links.
+- Accounts live in one JSON file, which is fine for a few thousand people; a
+  bigger deployment should move `server/db.js` onto a real database.
+- Invites only reach friends who have coprod open (otherwise, send the link).
 - Plugins are web plugins (WAM), not native VST/AU. Native plugins need a desktop
   app; see the plan below.
 - Vertex is CPU-hungry at extremes (like any big wavetable synth): 8 voices with
@@ -257,8 +353,7 @@ worklets some plugins use on secure pages (localhost is fine for development).
 - Automation of the bundled Acid/Echo plugins is applied slightly ahead of time
   (they react when events are scheduled, up to ~0.1 s early); Vertex is sample-block
   accurate.
-- Uploads are rate-limited per IP address but there's no storage quota yet, and
-  behind a reverse proxy everyone shares one address.
+- Uploads are rate-limited per account, but there's no storage quota yet.
 - Each person's play button is independent (like each person scrolling their own
   copy of a doc). There's no "play for everyone" yet.
 - Automation lives in patterns. When two clips of patterns that automate the same
@@ -282,4 +377,5 @@ worklets some plugins use on secure pages (localhost is fine for development).
    shares the audio, so everyone hears it.
 7. **FL Studio project import**: the .flp format is largely community-documented,
    so a "bring your FL beat into a shared room" importer is realistic.
-8. Accounts, a project list, and read-only share links.
+8. Private rooms and read-only share links; profile pictures; email
+   verification and password reset by email.

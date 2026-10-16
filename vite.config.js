@@ -7,7 +7,9 @@ export default defineConfig({
     port: 5173,
     proxy: {
       '/ws': { target: 'ws://localhost:3001', ws: true },
-      '/api': 'http://localhost:3001',
+      '/live': { target: 'ws://localhost:3001', ws: true },
+      // Keep the Host header: the server checks that requests come from the page's own origin.
+      '/api': { target: 'http://localhost:3001', changeOrigin: false },
       '/samples': 'http://localhost:3001',
     },
   },

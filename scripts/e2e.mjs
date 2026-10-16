@@ -1,4 +1,5 @@
-// End-to-end: two browsers edit the same project and see each other live.
+// End-to-end: people sign up, two browsers edit the same project and see each
+// other live, chat, become friends, and save and reopen it as a .copr file.
 //   npm run build && npm run e2e     (set CHROMIUM_PATH if needed)
 // Screenshots land in e2e-shots/.
 
@@ -58,14 +59,28 @@ const browser = await chromium.launch({
   args: ['--autoplay-policy=no-user-gesture-required'],
 });
 const errors = [];
-async function join_(name, viewport = { width: 1280, height: 860 }) {
-  const ctx = await browser.newContext({ viewport, deviceScaleFactor: 2 });
-  const page = await ctx.newPage();
+const watch = (page, name) => {
   page.on('pageerror', (e) => errors.push(`${name}: ${e.message}`));
-  page.on('console', (m) => m.type() === 'error' && !/fonts\.g/.test(m.text()) && errors.push(`${name}: ${m.text()}`));
+  page.on('console', (m) => {
+    if (m.type() !== 'error') return;
+    // Fonts and the WAM community list come from the internet, which may be out of reach (e.g. in a sandbox).
+    const url = m.location()?.url ?? '';
+    if (/fonts\.g/.test(m.text()) || (/^Failed to load resource/.test(m.text()) && url && !url.startsWith(`http://localhost:${srv.port}`))) return;
+    errors.push(`${name}: ${m.text()}`);
+  });
+};
+/** Open the invite link, create an account (the sign-up form comes first for invite links), land in the room. */
+async function join_(name, viewport = { width: 1280, height: 860 }, fullName = name) {
+  const ctx = await browser.newContext({ viewport, deviceScaleFactor: 2, acceptDownloads: true });
+  const page = await ctx.newPage();
+  watch(page, name);
   await page.goto(URL_);
-  await page.fill('#nameInput', name);
-  await page.click('#welcomeForm button.primary');
+  await page.waitForSelector('#authScreen:not([hidden]) #authName');
+  await page.fill('#authName', fullName);
+  await page.fill('#authUsername', name.toLowerCase());
+  await page.fill('#authEmail', `${name.toLowerCase()}@example.com`);
+  await page.fill('#authPassword', 'correct horse battery');
+  await page.click('#authGo');
   await page.waitForSelector('.row');
   return page;
 }
@@ -74,10 +89,54 @@ const project = (page) => page.evaluate(() => window.coprod.S.readProject(window
 
 try {
   const ana = await join_('Ana');
-  const ben = await join_('Ben');
+  const ben = await join_('Ben', undefined, 'Benjamin Okonkwo-Fairweather');
   await ana.waitForFunction(() => document.querySelectorAll('#people .avatar').length === 2);
   await ben.waitForFunction(() => document.querySelectorAll('#people .avatar').length === 2);
-  step('Both joined the room and see two people');
+  step('Both signed up from the invite link, joined the room and see two people');
+
+  // ---- Profiles and friends -------------------------------------------------
+  await ana.click('#people .avatar[data-user="ben"]');
+  await ana.waitForSelector('#profileCard [data-action="friend"]');
+  const card = await ana.textContent('#profileCard');
+  if (!card.includes('Benjamin Okonkwo-Fairweather') || !card.includes('@ben') || !/Here now, on Pattern 1/.test(card)) throw new Error(`profile card: ${card}`);
+  await (await ana.$('#profileCard')).screenshot({ path: `${SHOTS}0a-profile.png` });
+  await ana.click('#profileCard [data-action="friend"]');
+  await ben.waitForSelector('.notice-card:has-text("wants to be friends")');
+  await ben.click('.notice-card:has-text("wants to be friends") button.primary');
+  await ana.waitForSelector('#profileCard .pill.ok');
+  await ana.keyboard.press('Escape');
+  await ana.waitForSelector('#profileCard', { state: 'hidden' });
+  step('Clicking Ben’s avatar shows his full name and @username; Ana’s friend request pops up for Ben, he accepts, and her card says Friends');
+
+  // ---- Chat -----------------------------------------------------------------
+  await ana.click('#chatBtn');
+  await ana.fill('#chatInput', 'hey @ben, check the kick');
+  await ana.press('#chatInput', 'Enter');
+  await ben.waitForFunction(() => document.querySelector('#chatBadge')?.textContent === '1');
+  await ben.waitForSelector('.notice-card:has-text("check the kick")'); // a mention pops up while his chat is closed
+  await ben.click('#chatBtn');
+  await ben.waitForSelector('.chat-msg.mentions-me:has-text("check the kick")');
+  const who = await ben.textContent('.chat-msg .chat-who b');
+  if (who !== 'Ana') throw new Error(`chat author: ${who}`);
+  await ben.fill('#chatInput', 'on it');
+  await ben.press('#chatInput', 'Enter');
+  await ana.waitForSelector('.chat-msg:has-text("on it")');
+  await ana.screenshot({ path: `${SHOTS}0b-chat.png` });
+  await ana.click('#chatClose');
+  await ben.click('#chatClose');
+  step('Chat: Ana’s @mention reaches Ben (unread badge, a pop-up, highlighted), and his reply reaches her');
+
+  // ---- Home: projects and friends -------------------------------------------
+  await ana.fill('#title', 'E2E jam');
+  await ana.press('#title', 'Enter');
+  const home = await ana.context().newPage();
+  watch(home, 'Ana (home)');
+  await home.goto(`http://localhost:${srv.port}/`);
+  await home.waitForSelector('.project-card:has-text("E2E jam") .pj-live:has-text("Benjamin Okonkwo-Fairweather")');
+  await home.waitForSelector('#friendList .person:has-text("In “E2E jam”") button:has-text("Join")');
+  await home.screenshot({ path: `${SHOTS}0c-home.png` });
+  await home.close();
+  step('Ana’s home screen lists the project (and who’s in it now), and shows her friend Ben in that session with a Join button');
 
   // Ana toggles a kick step; Ben sees it.
   const kickStep = '.row:first-child .step[data-step="2"]';
@@ -913,6 +972,49 @@ try {
   );
   await ana.click('#autoPanel .ap-close');
   step('Automation: Ctrl+A, Ctrl+C on the volume lane, Ctrl+V on the pan lane: Ben has the same points');
+
+  // ---- Follow: Ben's view follows Ana's ---------------------------------------
+  await ben.click('#people .avatar[data-user="ana"]');
+  await ben.click('#profileCard button:has-text("Follow")');
+  await ben.waitForSelector('#followBar:not([hidden])');
+  for (const n of [2, 1]) {
+    await ana.click(`#patternTabs .tab:nth-child(${n})`);
+    await ben.waitForFunction(() => window.coprod.ui.patternId === [...window.coprod.provider.awareness.getStates().values()].find((s) => s.user?.username === 'ana')?.pattern);
+  }
+  await ben.click('#followStop');
+  await ben.waitForSelector('#followBar', { state: 'hidden' });
+  step('Ben follows Ana: when she switches patterns, so does his view');
+
+  // ---- .copr: save the project, open it as a new one -------------------------
+  await ana.click('#exportBtn');
+  const coprDl = ana.waitForEvent('download', { timeout: 30000 });
+  await ana.click('#exCopr');
+  const copr = await coprDl;
+  const coprPath = join(dataDir, 'saved.copr');
+  await copr.saveAs(coprPath);
+  await ana.click('#exCancel');
+  const zipBytes = readFileSync(coprPath);
+  if (copr.suggestedFilename() !== 'E2E jam.copr' || zipBytes.toString('latin1', 0, 2) !== 'PK') throw new Error(`copr file: ${copr.suggestedFilename()}`);
+  const original = await project(ana);
+  const opener = await ana.context().newPage();
+  watch(opener, 'Ana (open .copr)');
+  await opener.goto(`http://localhost:${srv.port}/`);
+  await opener.waitForSelector('#homeScreen:not([hidden])');
+  await opener.setInputFiles('#coprInput', coprPath);
+  await opener.waitForURL((u) => u.searchParams.get('room') && u.searchParams.get('room') !== new URL(URL_).searchParams.get('room'));
+  await opener.waitForSelector('.row');
+  const copy = await project(opener);
+  const sig = (p) => JSON.stringify({ t: p.title, b: p.bpm, c: p.channels.map((c) => [c.name, c.inst, c.sample?.id ?? null]), n: p.patterns.map((x) => x.notes.length) });
+  if (sig(copy) !== sig(original)) throw new Error(`the reopened project differs:\n${sig(original)}\n${sig(copy)}`);
+  // Its samples decode in the copy too (they travel inside the file, under the same content hashes).
+  await opener.click('#play');
+  await opener.waitForFunction(() => {
+    const { engine, ui } = window.coprod;
+    return ui.project.channels.filter((c) => c.sample).every((c) => engine.sampleStatus(c.sample.id).status === 'ready');
+  }, null, { timeout: 15000 });
+  await opener.click('#play');
+  await opener.close();
+  step(`Export → Download .copr saves "E2E jam.copr" (${(zipBytes.length / 1024).toFixed(0)} KB with its samples); opening it makes a new project with the same ${copy.channels.length} channels, notes and samples`);
 
   // A phone-sized third person.
   const cara = await join_('Cara', { width: 390, height: 844 });

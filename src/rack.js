@@ -5,6 +5,7 @@
 // slider someone is dragging is never replaced under their finger while
 // other people's edits stream in.
 
+import { shortName } from './ui.js';
 import { INSTRUMENTS, BUILT_IN, STEPS_PER_BAR, isSynth } from './shared/schema.js';
 
 const el = (tag, props = {}, ...children) => {
@@ -152,7 +153,7 @@ export class Rack {
     const here = remote.filter((s) => s.channel === c.id && s.pattern === pattern.id);
     r.row.classList.toggle('busy', here.length > 0);
     if (here.length) r.row.style.setProperty('--who', here[0].user.color);
-    r.badge.replaceChildren(...here.map((s) => el('span', { class: 'who', style: `--c:${s.user.color}` }, s.user.name)));
+    r.badge.replaceChildren(...here.map((s) => el('span', { class: 'who', style: `--c:${s.user.color}`, title: s.user.name }, shortName(s.user.name))));
 
     if (synth) {
       r.steps.hidden = true;
