@@ -15,12 +15,24 @@ export const until = async (fn, ms = 3000) => {
 
 /** Sign up (or in, if the account exists) and return { user, cookie, call }. */
 export async function account(port, name, extra = {}) {
-  const base = `http://localhost:${port}`;
-  const body = { email: `${name.toLowerCase()}@example.com`, password: 'correct horse', name, username: name.toLowerCase(), ...extra };
-  const post = (path) => fetch(`${base}${path}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
-  let res = await post('/api/auth/signup');
-  if (res.status === 409) res = await post('/api/auth/login');
+  const body = { password: 'correct horse', name, username: name.toLowerCase(), ...extra };
+  let res = await post(port, '/api/auth/signup', body);
+  if (res.status === 409) res = await post(port, '/api/auth/login', body);
   assert.ok(res.ok, `sign in as ${name}: ${res.status}`);
+  return signedIn(port, res);
+}
+
+/** Continue as a guest: { user, cookie, call }. */
+export async function guest(port, name) {
+  const res = await post(port, '/api/auth/guest', name === undefined ? {} : { name });
+  assert.equal(res.status, 201);
+  return signedIn(port, res);
+}
+
+const post = (port, path, body) =>
+  fetch(`http://localhost:${port}${path}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+
+async function signedIn(port, res) {
   const user = (await res.json()).user;
   const cookie = res.headers.get('set-cookie').split(';')[0];
   return { user, cookie, call: api(port, cookie) };

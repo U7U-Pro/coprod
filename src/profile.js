@@ -3,6 +3,7 @@
 
 import { api, live, session } from './api.js';
 import { $, el, face, toast, timeAgo, monthYear, colorPicker, dismissable } from './ui.js';
+import { suggestUsername, typedUsername } from './signin.js';
 
 let open_ = null; // { userId, anchor, close, refresh }
 
@@ -84,14 +85,17 @@ function render(p, opts, refresh) {
       done?.(res);
     });
 
-  const relation = {
-    friends: el('span', { class: 'pill ok' }, '✓ Friends'),
-    requested: el('span', { class: 'pill' }, 'Friend request sent'),
-    incoming: el('span', { class: 'pill warn' }, 'Wants to be friends'),
-  }[p.relation];
+  const relation = u.guest
+    ? el('span', { class: 'pill' }, 'Guest')
+    : {
+        friends: el('span', { class: 'pill ok' }, '✓ Friends'),
+        requested: el('span', { class: 'pill' }, 'Friend request sent'),
+        incoming: el('span', { class: 'pill warn' }, 'Wants to be friends'),
+      }[p.relation];
+  const iAmGuest = !!session.user?.guest;
 
   const facts = [];
-  if (u.created) facts.push(`Joined ${monthYear(u.created)}`);
+  if (u.created && !u.guest) facts.push(`Joined ${monthYear(u.created)}`);
   if (!self && p.together) facts.push(`${p.together} project${p.together === 1 ? '' : 's'} together`);
   if (!self && p.mutual) facts.push(`${p.mutual} mutual friend${p.mutual === 1 ? '' : 's'}`);
   if (p.relation === 'friends' && p.since) facts.push(`Friends since ${monthYear(p.since)}`);
@@ -111,7 +115,9 @@ function render(p, opts, refresh) {
   if (!p.loading && !self) {
     const friends = () => toast(`You and ${u.name} are friends now`);
     const button = (cls, action, label, call, done) => el('button', { class: `${cls} small`, 'data-action': action, onclick: friendAction(call, done) }, label);
-    if (p.relation === 'none') {
+    if (p.relation === 'none' && iAmGuest && !u.guest) {
+      buttons.push(el('button', { class: 'ghost small', onclick: () => (closeProfile(), openUpgrade()) }, 'Create an account to add friends'));
+    } else if (p.relation === 'none' && !u.guest) {
       buttons.push(
         button('primary', 'friend', '+ Add friend', () => api.post('/api/friends', { id: u.id }), (res) =>
           res.relation === 'friends' ? friends() : toast(`Friend request sent to ${u.name}`),
@@ -128,6 +134,7 @@ function render(p, opts, refresh) {
     buttons.push(el('button', { class: a.primary ? 'primary small' : 'ghost small', title: a.title ?? null, onclick: busy(async () => (await a.run()) !== false && closeProfile()) }, a.label));
   }
   if (self) {
+    if (iAmGuest) buttons.push(el('button', { class: 'primary small', 'data-action': 'upgrade', onclick: () => (closeProfile(), openUpgrade()) }, 'Create account'));
     buttons.push(el('button', { class: 'ghost small', onclick: () => (closeProfile(), openProfileEditor()) }, 'Edit profile'));
     buttons.push(el('button', { class: 'ghost small', onclick: signOut }, 'Sign out'));
   }
@@ -190,8 +197,22 @@ function place(card, anchor) {
 }
 
 export async function signOut() {
+  if (
+    session.user?.guest &&
+    !confirm(
+      'You’re a guest, so signing out deletes this guest account. Your projects stay with the people in them, but you won’t be able to get back to them as yourself.\n\nCreate an account first to keep them. Sign out anyway?',
+    )
+  )
+    return;
   await api.post('/api/auth/logout').catch(() => {});
   location.href = '/';
+}
+
+/** Swap in the server's latest copy of me (keeping the same object, which other modules hold). */
+function updateMe(user) {
+  for (const k of Object.keys(session.user)) if (!(k in user)) delete session.user[k]; // e.g. `guest` after making an account
+  Object.assign(session.user, user);
+  for (const fn of listeners) fn(session.user);
 }
 
 // ------------------------------------------------------------------ editing your own profile
@@ -206,7 +227,10 @@ export function openProfileEditor() {
   $('pfName').value = me.name;
   $('pfUsername').value = me.username;
   $('pfBio').value = me.bio ?? '';
-  $('pfEmail').textContent = me.email;
+  $('pfWho').textContent = `@${me.username}`;
+  // Guests have no username or password of their own yet.
+  for (const x of $('profileForm').querySelectorAll('[data-member]')) x.hidden = !!me.guest;
+  for (const x of $('profileForm').querySelectorAll('[data-guest]')) x.hidden = !me.guest;
   $('pfCurrent').value = '';
   $('pfNew').value = '';
   colorPicker($('pfColors'), color, (c) => (color = c));
@@ -221,16 +245,16 @@ export function openProfileEditor() {
     e.preventDefault();
     error($('pfError'));
     try {
-      const { user } = await api.patch('/api/me', { name: $('pfName').value, username: $('pfUsername').value, bio: $('pfBio').value, color });
-      Object.assign(session.user, user);
-      for (const fn of listeners) fn(session.user);
+      const patch = { name: $('pfName').value, bio: $('pfBio').value, color };
+      if (!me.guest) patch.username = $('pfUsername').value;
+      updateMe((await api.patch('/api/me', patch)).user);
       $('profileModal').hidden = true;
       toast('Profile saved');
     } catch (err) {
       error($('pfError'), err);
     }
   };
-  $('pfUsername').oninput = () => ($('pfUsername').value = $('pfUsername').value.toLowerCase().replace(/[^a-z0-9_]/g, ''));
+  $('pfUsername').oninput = () => ($('pfUsername').value = typedUsername($('pfUsername').value));
   $('pfPassGo').onclick = async () => {
     error($('pfPassError'));
     try {
@@ -244,6 +268,38 @@ export function openProfileEditor() {
   };
   $('pfCancel').onclick = () => ($('profileModal').hidden = true);
   $('pfSignOut').onclick = signOut;
+  $('pfUpgrade').onclick = () => {
+    $('profileModal').hidden = true;
+    openUpgrade();
+  };
   $('profileModal').hidden = false;
   $('pfName').focus();
+}
+
+/** A guest picks a username and password: same person, same projects, now a full account. */
+export function openUpgrade() {
+  const me = session.user;
+  if (!me.guest) return;
+  $('upName').value = /^Guest \d+$/.test(me.name) ? '' : me.name;
+  $('upUsername').value = suggestUsername(me.name.replace(/^Guest \d+$/, ''));
+  $('upPassword').value = '';
+  $('upError').hidden = true;
+  $('upUsername').oninput = () => ($('upUsername').value = typedUsername($('upUsername').value));
+  $('upgradeForm').onsubmit = async (e) => {
+    e.preventDefault();
+    $('upError').hidden = true;
+    try {
+      const { user } = await api.post('/api/auth/upgrade', { name: $('upName').value, username: $('upUsername').value, password: $('upPassword').value });
+      updateMe(user);
+      $('upgradeModal').hidden = true;
+      toast(`Welcome, @${user.username}! Your account is set up, with everything you made as a guest.`);
+    } catch (err) {
+      $('upError').textContent = err.message;
+      $('upError').hidden = false;
+      ({ name: $('upName'), username: $('upUsername'), password: $('upPassword') })[err.field]?.focus();
+    }
+  };
+  $('upCancel').onclick = () => ($('upgradeModal').hidden = true);
+  $('upgradeModal').hidden = false;
+  ($('upName').value ? $('upUsername') : $('upName')).focus();
 }

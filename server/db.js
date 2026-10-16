@@ -8,6 +8,10 @@
 //
 // The project documents themselves aren't here: they stay in rooms/<id>.ydoc.
 // This only records who has been in which project, so it can be listed.
+//
+// Guests are accounts too (guest: true, no password), so the server can still
+// say who wrote each chat message. A guest who signs out, or whose session
+// runs out, is gone for good: pruneGuests() removes them.
 
 import { readFile, writeFile, rename, mkdir } from 'node:fs/promises';
 import { dirname } from 'node:path';
@@ -21,17 +25,17 @@ export const hashToken = (token) => createHash('sha256').update(String(token)).d
 const newId = (prefix) => `${prefix}${randomBytes(9).toString('base64url').replace(/[-_]/g, 'x')}`;
 
 /** What anyone signed in may see about a person. */
-export const publicUser = (u) => u && { id: u.id, username: u.username, name: u.name, color: u.color, bio: u.bio, created: u.created };
-/** What a person sees about themselves. */
-export const privateUser = (u) => u && { ...publicUser(u), email: u.email };
+export const publicUser = (u) =>
+  u && { id: u.id, username: u.username, name: u.name, color: u.color, bio: u.bio, created: u.created, ...(u.guest ? { guest: true } : {}) };
+/** What a person sees about themselves (the same, for now; private details like billing would go here). */
+export const privateUser = (u) => u && publicUser(u);
 
 export class Db {
   /** @param {string|null} file  null keeps everything in memory (tests). */
   constructor(file = null, { saveDelayMs = 200 } = {}) {
     this.file = file;
     this.saveDelayMs = saveDelayMs;
-    this.users = new Map(); // id -> { id, email, username, name, color, bio, pass, created, seen }
-    this.byEmail = new Map();
+    this.users = new Map(); // id -> { id, username, name, color, bio, pass (null for guests), guest?, created, seen }
     this.byUsername = new Map();
     this.sessions = new Map(); // sha256(token) -> { user, created, expires }; the token itself is never stored
     this.friends = new Map(); // userId -> Map(friendId -> since), kept both ways
@@ -53,12 +57,16 @@ export class Db {
       // A damaged file stops the server instead of being overwritten with an empty one.
       if (text !== null) db.load(JSON.parse(text));
     }
+    db.pruneGuests();
     return db;
   }
 
   load(data) {
     const now = Date.now();
-    for (const u of data.users ?? []) this.index(u);
+    for (const u of data.users ?? []) {
+      delete u.email; // accounts from before sign-in went username-only
+      this.index(u);
+    }
     for (const [hash, s] of data.sessions ?? []) if (s.expires > now && this.users.has(s.user)) this.sessions.set(hash, s);
     for (const [a, b, since] of data.friends ?? []) this.link(a, b, since);
     for (const [from, to, at] of data.requests ?? []) this.inbox(to).set(from, at);
@@ -107,7 +115,6 @@ export class Db {
 
   index(u) {
     this.users.set(u.id, u);
-    this.byEmail.set(u.email, u.id);
     this.byUsername.set(u.username, u.id);
   }
 
@@ -115,22 +122,70 @@ export class Db {
     return this.users.get(id) ?? null;
   }
 
-  userByEmail(email) {
-    return this.user(this.byEmail.get(email));
-  }
-
   userByUsername(username) {
     return this.user(this.byUsername.get(username));
   }
 
-  createUser({ email, username, name, color, pass }) {
-    if (this.byEmail.has(email)) throw fail(409, 'There is already an account with that email. Sign in instead?', 'email');
+  createUser({ username, name, color, pass, guest = false }) {
     if (this.byUsername.has(username)) throw fail(409, 'That username is taken', 'username');
     const now = Date.now();
-    const u = { id: newId('u'), email, username, name, color, bio: '', pass, created: now, seen: now };
+    const u = { id: newId('u'), username, name, color, bio: '', pass, created: now, seen: now, ...(guest ? { guest: true } : {}) };
     this.index(u);
     this.changed();
     return u;
+  }
+
+  /** A guest account: a "guest_xxxxxx" username and no password. */
+  createGuest({ name, color }) {
+    let username;
+    do username = `guest_${randomBytes(6).toString('base64url').toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 6).padEnd(6, '0')}`;
+    while (this.byUsername.has(username));
+    return this.createUser({ username, name, color, pass: null, guest: true });
+  }
+
+  /** A guest picks a username and password and becomes a full account, keeping their projects. */
+  upgradeGuest(id, { username, pass, name }) {
+    const u = this.users.get(id);
+    if (!u?.guest) throw fail(400, 'You already have an account');
+    if (this.byUsername.has(username)) throw fail(409, 'That username is taken', 'username');
+    this.byUsername.delete(u.username);
+    this.byUsername.set(username, id);
+    Object.assign(u, { username, pass, created: Date.now() }, name ? { name } : {});
+    delete u.guest;
+    this.changed();
+    return u;
+  }
+
+  /** Remove an account and every trace of it: sessions, friends, requests, project memberships. */
+  deleteUser(id) {
+    const u = this.users.get(id);
+    if (!u) return;
+    this.users.delete(id);
+    this.byUsername.delete(u.username);
+    for (const [hash, s] of this.sessions) if (s.user === id) this.sessions.delete(hash);
+    for (const friend of this.friendIds(id)) this.friends.get(friend)?.delete(id);
+    this.friends.delete(id);
+    this.requests.delete(id);
+    for (const inbox of this.requests.values()) inbox.delete(id);
+    for (const [room, p] of this.projects) {
+      p.members.delete(id);
+      if (!p.members.size) this.projects.delete(room); // (the room itself stays on disk; its link still works)
+    }
+    this.changed();
+  }
+
+  /** Drop expired sessions, then guests with no session left (nobody can ever sign in as them again). */
+  pruneGuests(now = Date.now()) {
+    for (const [hash, s] of this.sessions) if (s.expires <= now) this.sessions.delete(hash);
+    const signedIn = new Set([...this.sessions.values()].map((s) => s.user));
+    let removed = 0;
+    for (const u of [...this.users.values()]) {
+      if (u.guest && !signedIn.has(u.id)) {
+        this.deleteUser(u.id);
+        removed++;
+      }
+    }
+    return removed;
   }
 
   /** Changes the user object in place, so anyone holding it (open connections) sees the change. */
@@ -147,17 +202,13 @@ export class Db {
     return u;
   }
 
-  /** Up to `limit` people whose username or name starts with `q` (or whose email is exactly `q`). */
+  /** Up to `limit` people (not guests) whose username, name, or a word of their name starts with `q`. */
   search(q, { limit = 8, except = null } = {}) {
     q = String(q).trim().toLowerCase().replace(/^@/, '');
     if (q.length < 2) return [];
-    if (q.includes('@')) {
-      const u = this.userByEmail(q);
-      return u && u.id !== except ? [u] : [];
-    }
     const out = [];
     for (const u of this.users.values()) {
-      if (u.id === except) continue;
+      if (u.id === except || u.guest) continue;
       const words = u.name.toLowerCase().split(/\s+/);
       if (u.username.startsWith(q) || u.name.toLowerCase().startsWith(q) || words.some((w) => w.startsWith(q))) out.push(u);
     }

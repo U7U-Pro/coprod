@@ -15,25 +15,29 @@
       <form class="card auth-card" id="authForm" novalidate>
         <h1>co<b>prod</b></h1>
         <p id="authLead">Make beats together, live, in your browser.</p>
-        <div class="seg auth-tabs" id="authTabs" role="tablist" aria-label="Sign in or create an account">
+        <div class="seg auth-tabs" id="authTabs" role="tablist" aria-label="Sign in or create an account" data-for="login signup">
           <button type="button" role="tab" data-tab="login" class="on">Sign in</button>
           <button type="button" role="tab" data-tab="signup">Create account</button>
         </div>
-        <label data-for="signup" hidden>Your name
+        <h2 data-for="guest" hidden>Join as a guest</h2>
+        <label data-for="signup guest" hidden>Your name
           <input id="authName" maxlength="32" autocomplete="name" placeholder="What people see, e.g. Ana Lucía" />
         </label>
-        <label data-for="signup" hidden>Username
-          <span class="at-input"><span aria-hidden="true">@</span><input id="authUsername" maxlength="20" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="ana_beats" /></span>
-          <span class="hint">How friends find you. Letters, numbers and _.</span>
+        <label data-for="login signup">Username
+          <span class="at-input"><span aria-hidden="true">@</span><input id="authUsername" maxlength="20" autocomplete="username" autocapitalize="off" spellcheck="false" placeholder="ana_beats" /></span>
+          <span class="hint" data-for="signup" hidden>How friends find you. Letters, numbers and _.</span>
         </label>
-        <label>Email <input id="authEmail" type="email" autocomplete="username" inputmode="email" autocapitalize="off" spellcheck="false" /></label>
-        <label>Password <input id="authPassword" type="password" autocomplete="current-password" /></label>
-        <div data-for="signup" hidden>
+        <label data-for="login signup">Password <input id="authPassword" type="password" autocomplete="current-password" /></label>
+        <div data-for="signup guest" hidden>
           <span class="field-label">Your color</span>
           <div id="authColors" class="colors" role="radiogroup" aria-label="Your color"></div>
         </div>
         <p class="form-error" id="authError" role="alert" hidden></p>
         <button class="primary" id="authGo">Sign in</button>
+        <p class="hint" data-for="guest" hidden>Guests can edit, play and chat right away, in this browser. Create an account any time to keep your projects on every device and add friends.</p>
+        <div class="auth-or" data-for="login signup"><span>or</span></div>
+        <button type="button" class="ghost auth-guest" id="authGuest" data-for="login signup">Continue as guest</button>
+        <button type="button" class="linklike auth-back" id="authBack" data-for="guest" hidden>← Sign in or create an account instead</button>
       </form>
     </div>
 
@@ -54,7 +58,7 @@
         <aside class="home-friends" aria-labelledby="friendsHead">
           <div class="home-head"><h2 id="friendsHead">Friends</h2><span class="hint" id="friendCount"></span></div>
           <div class="friend-add">
-            <input id="friendSearch" type="search" placeholder="Add a friend: @username or email" autocomplete="off" aria-label="Find people" />
+            <input id="friendSearch" type="search" placeholder="Add a friend by name or @username" autocomplete="off" aria-label="Find people" />
             <div id="friendResults" class="friend-results" hidden></div>
           </div>
           <div id="friendRequests"></div>
@@ -268,7 +272,7 @@
     <div id="inviteModal" class="modal" hidden>
       <div class="card invite-card" role="dialog" aria-labelledby="inviteHead">
         <h2 id="inviteHead">Invite people</h2>
-        <p>Anyone signed in to coprod with this link can join and edit.</p>
+        <p>Anyone with this link can join and edit, with an account or as a guest.</p>
         <div class="invite-link">
           <input id="inviteLink" readonly aria-label="Link to this session" />
           <button type="button" class="primary small" id="inviteCopy">Copy link</button>
@@ -283,7 +287,7 @@
       <form class="card" id="profileForm">
         <h2>Your profile</h2>
         <label>Name <input id="pfName" maxlength="32" autocomplete="name" /></label>
-        <label>Username
+        <label data-member>Username
           <span class="at-input"><span aria-hidden="true">@</span><input id="pfUsername" maxlength="20" autocomplete="off" autocapitalize="off" spellcheck="false" /></span>
         </label>
         <label>About you <textarea id="pfBio" maxlength="160" rows="3" placeholder="What you make, what you're into…"></textarea></label>
@@ -293,14 +297,32 @@
           <button class="primary">Save</button>
           <button type="button" class="ghost" id="pfCancel">Cancel</button>
         </div>
-        <details>
+        <details data-member>
           <summary>Change password</summary>
           <label>Current password <input id="pfCurrent" type="password" autocomplete="current-password" /></label>
           <label>New password <input id="pfNew" type="password" autocomplete="new-password" placeholder="At least 8 characters" /></label>
           <p class="form-error" id="pfPassError" role="alert" hidden></p>
           <button type="button" class="ghost" id="pfPassGo">Change password</button>
         </details>
-        <p class="hint">Signed in as <span id="pfEmail"></span> · <button type="button" class="linklike" id="pfSignOut">Sign out</button></p>
+        <p class="hint" data-member>Signed in as <span id="pfWho"></span> · <button type="button" class="linklike" id="pfSignOut">Sign out</button></p>
+        <p class="hint" data-guest hidden>You’re a guest. <button type="button" class="linklike" id="pfUpgrade">Create an account</button> to keep your projects and add friends.</p>
+      </form>
+    </div>
+
+    <div id="upgradeModal" class="modal" hidden>
+      <form class="card" id="upgradeForm" novalidate>
+        <h2>Create your account</h2>
+        <p>Keep everything you made as a guest, sign in from any device, and add friends.</p>
+        <label>Your name <input id="upName" maxlength="32" autocomplete="name" /></label>
+        <label>Username
+          <span class="at-input"><span aria-hidden="true">@</span><input id="upUsername" maxlength="20" autocomplete="username" autocapitalize="off" spellcheck="false" placeholder="ana_beats" /></span>
+        </label>
+        <label>Password <input id="upPassword" type="password" autocomplete="new-password" placeholder="At least 8 characters" /></label>
+        <p class="form-error" id="upError" role="alert" hidden></p>
+        <div class="form-actions">
+          <button class="primary">Create account</button>
+          <button type="button" class="ghost" id="upCancel">Not now</button>
+        </div>
       </form>
     </div>
 

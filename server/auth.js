@@ -1,5 +1,5 @@
-// Passwords, the session cookie, rate limits, and the rules for emails,
-// usernames and display names.
+// Passwords, the session cookie, rate limits, and the rules for usernames
+// and display names.
 
 import { scrypt, randomBytes, timingSafeEqual } from 'node:crypto';
 import { COLORS } from '../src/shared/colors.js';
@@ -33,8 +33,8 @@ export async function checkPassword(password, stored) {
   return got.length === expected.length && timingSafeEqual(got, expected);
 }
 
-// A login for an email with no account does the same work as a real one, so
-// response times don't reveal who has an account.
+// A login for a username with no account (or a guest, who has no password)
+// does the same work as a real one, so response times give nothing away.
 let decoy;
 export async function wastePasswordCheck(password) {
   decoy ??= await hashPassword(randomBytes(12).toString('hex'));
@@ -45,15 +45,14 @@ export async function wastePasswordCheck(password) {
 
 export const USERNAME_RULE = 'Usernames are 3 to 20 characters: letters, numbers and _';
 
-export function cleanEmail(v) {
-  const email = String(v ?? '').trim().toLowerCase();
-  return email.length <= 254 && /^[^\s@]+@[^\s@.]+(\.[^\s@.]+)+$/.test(email) ? email : null;
-}
-
+/** A username as typed ("@Ana_99" -> "ana_99"), or null if it breaks the rules. */
 export function cleanUsername(v) {
   const name = String(v ?? '').trim().toLowerCase().replace(/^@/, '');
   return /^[a-z0-9_]{3,20}$/.test(name) ? name : null;
 }
+
+// Guests get "guest_xxxxxx" usernames, so nobody else can pick one.
+export const isGuestUsername = (username) => username.startsWith('guest_');
 
 // Control characters and bidi overrides could make one name look like another.
 const UNSAFE = /[\p{Cc}‎‏‪-‮⁦-⁩]/gu;

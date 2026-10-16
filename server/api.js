@@ -15,8 +15,8 @@ import {
   hashPassword,
   checkPassword,
   wastePasswordCheck,
-  cleanEmail,
   cleanUsername,
+  isGuestUsername,
   cleanName,
   cleanBio,
   cleanColor,
@@ -47,6 +47,14 @@ async function readJson(req) {
   }
 }
 
+/** A username someone may claim (sign up, or a guest making an account). */
+function claimable(v) {
+  const username = cleanUsername(v);
+  if (!username) throw fail(400, USERNAME_RULE, 'username');
+  if (isGuestUsername(username)) throw fail(400, 'Usernames starting with guest_ are kept for guests', 'username');
+  return username;
+}
+
 function checkPasswordRules(password) {
   if (typeof password !== 'string' || [...password].length < PASSWORD_MIN) throw fail(400, `Use at least ${PASSWORD_MIN} characters`, 'password');
   if (password.length > PASSWORD_MAX) throw fail(400, 'That password is too long', 'password');
@@ -56,11 +64,12 @@ export function createApi({ db, rooms, samples }) {
   const live = new Map(); // userId -> Set of /live sockets
   const where = new Map(); // userId -> Map(room -> joined at), from room connections
 
-  // Limits on guessing and spam. Login failures count per address+email and
-  // per email, so one person can't lock everyone out from behind a shared proxy.
+  // Limits on guessing and spam. Login failures count per address+username and
+  // per username, so one person can't lock everyone out from behind a shared proxy.
   const loginFails = new Limiter(10, 15 * 60_000);
-  const emailFails = new Limiter(50, 15 * 60_000);
+  const usernameFails = new Limiter(50, 15 * 60_000);
   const signups = new Limiter(30, 60 * 60_000);
+  const guests = new Limiter(60, 60 * 60_000);
   const friendAsks = new Limiter(40, 60 * 60_000);
   const invites = new Limiter(30, 10 * 60_000);
   const imports = new Limiter(20, 10 * 60_000);
@@ -183,6 +192,8 @@ export function createApi({ db, rooms, samples }) {
   function changeFriendship(me, otherId, action) {
     const other = db.user(otherId);
     if (!other) throw fail(404, 'No such person');
+    if (action === 'request' && me.guest) throw fail(403, 'Guests can’t add friends. Create an account (it keeps your projects) and you can.');
+    if (action === 'request' && other.guest) throw fail(403, `${other.name} is a guest. Once they create an account, you can add them.`);
     const before = db.relation(me.id, otherId);
     let relation;
     if (action === 'request') {
@@ -224,18 +235,14 @@ export function createApi({ db, rooms, samples }) {
       /^\/api\/auth\/signup$/,
       async (req, res, { ip }) => {
         const body = await readJson(req);
-        const email = cleanEmail(body.email);
-        if (!email) throw fail(400, 'Enter a valid email address', 'email');
-        checkPasswordRules(body.password);
         const name = cleanName(body.name);
         if (!name) throw fail(400, 'Tell people what to call you', 'name');
-        const username = cleanUsername(body.username);
-        if (!username) throw fail(400, USERNAME_RULE, 'username');
-        if (db.userByEmail(email)) throw fail(409, 'There is already an account with that email. Sign in instead?', 'email');
-        if (db.userByUsername(username)) throw fail(409, 'That username is taken', 'username');
+        const username = claimable(body.username);
+        checkPasswordRules(body.password);
+        if (db.userByUsername(username)) throw fail(409, 'That username is taken. Sign in instead?', 'username');
         if (!signups.allow(ip)) throw fail(429, 'Too many new accounts from here. Try again later.');
         const pass = await hashPassword(body.password);
-        const user = db.createUser({ email, username, name, color: cleanColor(body.color) ?? randomColor(), pass });
+        const user = db.createUser({ username, name, color: cleanColor(body.color) ?? randomColor(), pass });
         signIn(req, res, user, 201);
       },
       { auth: false },
@@ -245,17 +252,17 @@ export function createApi({ db, rooms, samples }) {
       /^\/api\/auth\/login$/,
       async (req, res, { ip }) => {
         const body = await readJson(req);
-        const email = cleanEmail(body.email);
+        const username = cleanUsername(body.username);
         const password = String(body.password ?? '');
-        if (!email || !password) throw fail(400, 'Enter your email and password');
-        const key = `${ip}|${email}`;
-        if (loginFails.blocked(key) || emailFails.blocked(email)) throw fail(429, 'Too many tries. Wait a few minutes, then try again.');
-        const user = db.userByEmail(email);
-        const ok = user ? await checkPassword(password, user.pass) : (await wastePasswordCheck(password), false);
+        if (!username || !password) throw fail(400, 'Enter your username and password');
+        const key = `${ip}|${username}`;
+        if (loginFails.blocked(key) || usernameFails.blocked(username)) throw fail(429, 'Too many tries. Wait a few minutes, then try again.');
+        const user = db.userByUsername(username);
+        const ok = user?.pass ? await checkPassword(password, user.pass) : (await wastePasswordCheck(password), false);
         if (!ok) {
           loginFails.hit(key);
-          emailFails.hit(email);
-          throw fail(401, 'Wrong email or password');
+          usernameFails.hit(username);
+          throw fail(401, 'Wrong username or password');
         }
         signIn(req, res, user);
       },
@@ -263,9 +270,42 @@ export function createApi({ db, rooms, samples }) {
     ],
     [
       'POST',
+      /^\/api\/auth\/guest$/,
+      // No username or password: a name (optional) and a color, for this browser only.
+      async (req, res, { ip }) => {
+        const body = await readJson(req);
+        if (!guests.allow(ip)) throw fail(429, 'Too many guests from here. Try again later, or create an account.');
+        const name = cleanName(body.name) ?? `Guest ${1000 + Math.floor(Math.random() * 9000)}`;
+        signIn(req, res, db.createGuest({ name, color: cleanColor(body.color) ?? randomColor() }), 201);
+      },
+      { auth: false },
+    ],
+    [
+      'POST',
+      /^\/api\/auth\/upgrade$/,
+      // A guest becomes a full account: same person, same projects, now with a username and password.
+      async (req, res, { me }) => {
+        if (!me.guest) throw fail(400, 'You already have an account');
+        const body = await readJson(req);
+        const username = claimable(body.username);
+        checkPasswordRules(body.password);
+        const name = 'name' in body ? cleanName(body.name) : null;
+        if ('name' in body && !name) throw fail(400, 'Tell people what to call you', 'name');
+        if (db.userByUsername(username)) throw fail(409, 'That username is taken', 'username');
+        const pass = await hashPassword(body.password);
+        db.upgradeGuest(me.id, { username, pass, name });
+        friendsChanged(me.id);
+        json(res, 200, { user: privateUser(me) });
+      },
+    ],
+    [
+      'POST',
       /^\/api\/auth\/logout$/,
       async (req, res) => {
+        const me = userOf(req);
         db.endSession(readCookie(req));
+        // A guest can never sign back in, so their account goes now rather than lingering.
+        if (me?.guest) db.deleteUser(me.id);
         json(res, 200, { ok: true }, { 'set-cookie': sessionCookie(req, '', 0) });
       },
       { auth: false },
@@ -294,7 +334,10 @@ export function createApi({ db, rooms, samples }) {
           patch[field] = value;
         };
         take('name', cleanName(body.name), 'Tell people what to call you');
-        take('username', cleanUsername(body.username), USERNAME_RULE);
+        if ('username' in body && body.username !== me.username) {
+          if (me.guest) throw fail(400, 'Guests pick a username when they create an account', 'username');
+          patch.username = claimable(body.username);
+        }
         take('color', cleanColor(body.color), 'Pick one of the colors');
         take('bio', cleanBio(body.bio));
         db.updateUser(me.id, patch);
@@ -306,8 +349,9 @@ export function createApi({ db, rooms, samples }) {
       'POST',
       /^\/api\/me\/password$/,
       async (req, res, { me, ip }) => {
+        if (me.guest) throw fail(400, 'Guests don’t have a password. Create an account to set one.');
         const body = await readJson(req);
-        const key = `${ip}|${me.email}`;
+        const key = `${ip}|${me.username}`;
         if (loginFails.blocked(key)) throw fail(429, 'Too many tries. Wait a few minutes, then try again.');
         if (!(await checkPassword(String(body.current ?? ''), me.pass))) {
           loginFails.hit(key);
@@ -465,12 +509,17 @@ export function createApi({ db, rooms, samples }) {
     }
   }
 
+  // Guests whose session ran out can never come back: clear them out now and then.
+  const pruner = setInterval(() => db.pruneGuests(), 60 * 60_000);
+  pruner.unref();
+
   return {
     handle,
     userOf,
     addLive,
     presence,
     close() {
+      clearInterval(pruner);
       for (const set of live.values()) for (const ws of set) clearInterval(ws.pingTimer);
       live.clear();
     },

@@ -78,8 +78,20 @@ async function join_(name, viewport = { width: 1280, height: 860 }, fullName = n
   await page.waitForSelector('#authScreen:not([hidden]) #authName');
   await page.fill('#authName', fullName);
   await page.fill('#authUsername', name.toLowerCase());
-  await page.fill('#authEmail', `${name.toLowerCase()}@example.com`);
   await page.fill('#authPassword', 'correct horse battery');
+  await page.click('#authGo');
+  await page.waitForSelector('.row');
+  return page;
+}
+
+/** Open the invite link and continue as a guest (just a name). */
+async function joinAsGuest(name, viewport) {
+  const ctx = await browser.newContext({ viewport, deviceScaleFactor: 2 });
+  const page = await ctx.newPage();
+  watch(page, name);
+  await page.goto(URL_);
+  await page.click('#authGuest');
+  await page.fill('#authName', name);
   await page.click('#authGo');
   await page.waitForSelector('.row');
   return page;
@@ -1016,15 +1028,32 @@ try {
   await opener.close();
   step(`Export → Download .copr saves "E2E jam.copr" (${(zipBytes.length / 1024).toFixed(0)} KB with its samples); opening it makes a new project with the same ${copy.channels.length} channels, notes and samples`);
 
-  // A phone-sized third person.
-  const cara = await join_('Cara', { width: 390, height: 844 });
+  // A phone-sized third person, joining as a guest.
+  const cara = await joinAsGuest('Cara', { width: 390, height: 844 });
   await cara.waitForFunction(() => document.querySelectorAll('#people .avatar').length === 3);
   await cara.screenshot({ path: `${SHOTS}3-cara-mobile.png` });
   await cara.click('.row.synth .miniroll');
   await cara.waitForSelector('#rollPanel:not([hidden])');
   await cara.waitForTimeout(400);
   await cara.screenshot({ path: `${SHOTS}4-cara-mobile-roll.png` });
-  step('A third (mobile) user joins and sees everyone');
+  step('A third (mobile) person joins as a guest, with just a name, and sees everyone');
+
+  // Others see she's a guest (no friend button); she makes an account from her own card and keeps her place.
+  await ana.click('#people .avatar[data-user^="guest_"]');
+  await ana.waitForSelector('#profileCard .pill:has-text("Guest")');
+  if (await ana.$('#profileCard [data-action="friend"]')) throw new Error('guests can’t be added as friends');
+  await ana.keyboard.press('Escape');
+  await cara.click('#rollClose');
+  await cara.click('#people .avatar[data-user^="guest_"]');
+  await cara.click('#profileCard [data-action="upgrade"]');
+  await cara.waitForSelector('#upgradeModal:not([hidden])');
+  await cara.fill('#upUsername', 'cara');
+  await cara.fill('#upPassword', 'correct horse battery');
+  await cara.click('#upgradeForm button.primary');
+  await cara.waitForSelector('#upgradeModal', { state: 'hidden' });
+  await ana.waitForSelector('#people .avatar[data-user="cara"]');
+  if (await ana.$('#people .avatar[data-user^="guest_"]')) throw new Error('Cara still shows as a guest');
+  step('Ana sees Cara is a guest (no Add friend); Cara creates an account from her profile card and becomes @cara for everyone, without leaving');
 
   if (errors.length) throw new Error(`browser errors:\n${errors.join('\n')}`);
   console.log('\nE2E PASSED');

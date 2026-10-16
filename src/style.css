@@ -1407,6 +1407,10 @@ body.dropping .drop-hint {
   outline: 2px solid color-mix(in srgb, var(--accent) 60%, transparent);
 }
 
+.card .at-input input:focus {
+  outline: none; /* the box around it (with the @) shows the focus */
+}
+
 .card textarea {
   background: var(--bg);
   border: 1px solid var(--line);
@@ -2222,4 +2226,53 @@ body.dropping .drop-hint {
   .follow-bar {
     position: static;
   }
+}
+
+/* ---------------------------------------------------------------- guests */
+
+.auth-or {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.auth-or::before,
+.auth-or::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--line);
+}
+
+.card .auth-guest {
+  align-self: stretch;
+  padding: 10px;
+}
+
+.auth-back {
+  align-self: center;
+  font-size: 13px;
+}
+
+.auth-card h2 {
+  font-size: 16px;
+}
+
+.guest-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border: 1px dashed var(--line);
+  border-radius: 12px;
+  padding: 14px;
+}
+
+.guest-card p {
+  margin: 0;
+}
+
+.me-button .pill {
+  flex: none;
 }

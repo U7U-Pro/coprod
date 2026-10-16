@@ -3,7 +3,7 @@
 
 import { api, live, session, importCopr, exportCopr } from './api.js';
 import { $, el, face, toast, timeAgo, dismissable, saveBlob } from './ui.js';
-import { openProfile, onProfileSaved } from './profile.js';
+import { openProfile, onProfileSaved, openUpgrade } from './profile.js';
 import { goToRoom } from './nav.js';
 
 const data = { projects: null, friends: null };
@@ -15,7 +15,12 @@ export function showHome() {
   $('homeScreen').hidden = false;
   document.title = 'Your projects · coprod';
   drawMe();
-  onProfileSaved(drawMe);
+  let wasGuest = !!session.user.guest;
+  onProfileSaved((me) => {
+    drawMe();
+    if (wasGuest !== !!me.guest) loadFriends(); // a guest just made an account: friends are open to them now
+    wasGuest = !!me.guest;
+  });
 
   $('homeNew').onclick = newProject;
   $('homeOpen').onclick = () => {
@@ -49,8 +54,8 @@ function scheduleRefresh() {
 function drawMe() {
   const me = session.user;
   const b = $('homeMe');
-  b.replaceChildren(face(me, { size: 30 }), el('span', { class: 'me-name' }, me.name));
-  b.title = `${me.name} (@${me.username})`;
+  b.replaceChildren(...[face(me, { size: 30 }), el('span', { class: 'me-name' }, me.name), me.guest && el('span', { class: 'pill' }, 'Guest')].filter(Boolean));
+  b.title = me.guest ? `${me.name} (guest)` : `${me.name} (@${me.username})`;
   b.onclick = () => openProfile(me.id, { anchor: b, user: me });
 }
 
@@ -217,6 +222,7 @@ function projectMenu(button, p) {
 // ------------------------------------------------------------------ friends
 
 async function loadFriends() {
+  if (session.user.guest) return drawGuestFriends();
   try {
     data.friends = await api.get('/api/friends');
     drawFriends();
@@ -271,7 +277,25 @@ const small = (label, cls, run) =>
     label,
   );
 
+/** Guests have no friends list: say what an account gets you. */
+function drawGuestFriends() {
+  $('friendCount').textContent = '';
+  $('friendSearch').closest('.friend-add').hidden = true;
+  $('friendRequests').replaceChildren();
+  $('friendSent').replaceChildren();
+  $('friendList').replaceChildren(
+    el(
+      'div',
+      { class: 'guest-card' },
+      el('p', {}, 'You’re a guest. Create an account to add friends, see when they’re jamming, and invite them in.'),
+      el('p', { class: 'hint' }, 'Everything you’ve made as a guest comes with you. As a guest, your projects are only on this browser.'),
+      el('button', { type: 'button', class: 'primary', 'data-action': 'upgrade', onclick: openUpgrade }, 'Create account'),
+    ),
+  );
+}
+
 function drawFriends() {
+  $('friendSearch').closest('.friend-add').hidden = false;
   const { friends, incoming, outgoing } = data.friends;
   const live_ = friends.filter((f) => f.status !== 'offline').length;
   $('friendCount').textContent = friends.length ? `${live_} of ${friends.length} online` : '';
@@ -347,7 +371,7 @@ function setupSearch() {
                       : [],
               }),
             )
-          : [el('p', { class: 'hint' }, q.includes('@') && !q.startsWith('@') ? 'Nobody has an account with that email.' : 'Nobody by that name yet.')]),
+          : [el('p', { class: 'hint' }, 'Nobody by that name yet.')]),
       );
       box.hidden = false;
     } catch (err) {

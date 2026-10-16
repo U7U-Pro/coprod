@@ -36,7 +36,7 @@ export const CHAT_KEEP = 300; // messages kept per room
 export const CHAT_MAX = 1000; // characters per message
 
 /** How a person appears to others in the room: in presence and on chat messages. */
-export const badge = (u) => ({ id: u.id, name: u.name, username: u.username, color: u.color });
+export const badge = (u) => ({ id: u.id, name: u.name, username: u.username, color: u.color, ...(u.guest ? { guest: true } : {}) });
 
 export function cleanChat(text) {
   const t = String(text ?? '')

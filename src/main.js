@@ -8,7 +8,7 @@ import { api, live, session, exportCopr, importCopr } from './api.js';
 import { el, face, initial, toast, timeAgo, saveBlob } from './ui.js';
 import { goToRoom } from './nav.js';
 import { Chat } from './chat.js';
-import { openProfile, onProfileSaved } from './profile.js';
+import { openProfile, onProfileSaved, openUpgrade } from './profile.js';
 import { Engine } from './audio.js';
 import { Rack } from './rack.js';
 import { PianoRoll } from './pianoroll.js';
@@ -74,9 +74,10 @@ const store = {
 
 // Who I am comes from my account (the server shows everyone else the same).
 const me = session.user;
-const badge = () => ({ id: me.id, name: me.name, username: me.username, color: me.color });
+const badge = () => ({ id: me.id, name: me.name, username: me.username, color: me.color, ...(me.guest ? { guest: true } : {}) });
 onProfileSaved(() => {
-  publishPresence();
+  publishPresence(); // (the server re-reads the account, e.g. a guest who just made one)
+  if (!$('inviteModal').hidden) drawInviteFriends();
   render();
 });
 
@@ -476,7 +477,7 @@ function renderNow() {
       const mine = s.user.id === me.id;
       const b = el('button', { type: 'button', class: `avatar${ui.following === s.user.id ? ' followed' : ''}`, style: `--c:${s.user.color}`, dataset: { user: s.user.username ?? '' } }, initial(s.user.name));
       const where = p.patterns.find((x) => x.id === s.pattern)?.name;
-      b.title = `${s.user.name}${mine ? ' (you)' : ''}${where && !mine ? ` · on ${where}` : ''}`;
+      b.title = `${s.user.name}${mine ? ' (you)' : s.user.guest ? ' (guest)' : ''}${where && !mine ? ` · on ${where}` : ''}`;
       b.setAttribute('aria-label', `${b.title}: show profile`);
       b.onclick = () => showPerson(s.user, b);
       return b;
@@ -849,6 +850,13 @@ $('chatClose').onclick = () => chat.close();
 async function drawInviteFriends() {
   const box = $('inviteFriends');
   const hint = (text) => el('p', { class: 'hint' }, text);
+  if (me.guest) {
+    box.replaceChildren(
+      hint('Guests send the link. With an account you can add friends and invite them here with one click.'),
+      el('button', { type: 'button', class: 'ghost small', onclick: () => (($('inviteModal').hidden = true), openUpgrade()) }, 'Create an account'),
+    );
+    return;
+  }
   try {
     const { friends } = await api.get('/api/friends');
     const here = new Set(remoteStates().map((s) => s.user.id));

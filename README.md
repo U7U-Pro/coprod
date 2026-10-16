@@ -12,10 +12,10 @@ npm install
 npm run dev        # http://localhost:5173  (Vite + sync server, hot reload)
 ```
 
-Create an account (email and password), then **+ New project** gives you a
-fresh room with a starter beat. Press **Invite** and send the link, or invite a
-friend directly; whoever opens the link signs in (or signs up) and joins the
-same project.
+Create an account (a username and a password) or **Continue as guest**, then
+**+ New project** gives you a fresh room with a starter beat. Press **Invite** and
+send the link, or invite a friend directly; whoever opens the link signs in,
+signs up or continues as a guest, and joins the same project.
 
 Production:
 
@@ -26,16 +26,23 @@ npm start          # serves dist/ and the sync socket on $PORT (default 3000)
 
 ## What's in the prototype
 
-- **Accounts**: sign in with your email and a password. You pick a display name
-  (shown in full on your profile), a unique **@username** (how friends find
-  you), a color and a short "about you". Sessions last 30 days and renew while
-  you use coprod; changing your password signs you out everywhere else.
+- **Accounts**: sign in with your **@username** and a password (no email). You
+  pick a display name (shown in full on your profile), the username (how friends
+  find you), a color and a short "about you". Sessions last 30 days and renew
+  while you use coprod; changing your password signs you out everywhere else.
+- **Guests**: **Continue as guest** needs only a name (or not even that). Guests
+  can make and open projects, edit, play and chat, and their projects show on
+  their home screen in that browser. They're marked "Guest" for everyone else,
+  and can't add friends or be added. **Create account** (on a guest's own profile
+  card, home screen or the invite dialog) turns them into a full account,
+  keeping their projects. Signing out deletes a guest account (coprod asks
+  first), and guests whose session has run out are cleared away.
 - **Your projects** (the home screen at `/`): every project you've opened, newest
   first, with who else has worked on it and who's in it right now. Open one,
   download it as a **.copr** file, copy its invite link, or remove it from your
   list. **Open .copr…** (or dropping a .copr file on the page) opens a saved
   project as a new one.
-- **Friends**: find people by @username, name or exact email and send a friend
+- **Friends**: find people by @username or name and send a friend
   request. Requests, acceptances and invites pop up live on whatever screen
   you're on. Your friends list shows who's online, who's offline (and when they
   were last seen), and who's **in a session**, with the project's name, who
@@ -279,7 +286,7 @@ as someone else.
 - `server/db.js`: accounts, sign-in sessions, friends and project lists, kept in
   memory and written to `data/coprod.json` (atomically) after changes.
 - `server/auth.js`: password hashing (scrypt, salted), the session cookie, rate
-  limits, and the rules for emails, usernames and names.
+  limits, and the rules for usernames and names.
 - `server/api.js`: the `/api` routes and the `/live` socket; friends' presence
   comes from who's connected to which room.
 - `server/copr.js`: .copr files (a small zip reader and writer on Node's zlib).
@@ -328,16 +335,20 @@ secure pages (localhost is fine for development), and the session cookie is
 marked Secure there.
 
 Someone forgot their password? Stop the server and run
-`node scripts/reset-password.mjs their@email.com` (with the same `COPROD_DATA`):
+`node scripts/reset-password.mjs their_username` (with the same `COPROD_DATA`):
 it prints a new password and signs them out everywhere.
 
 ## Known limits (it's a prototype)
 
-- Rooms are "anyone signed in with the link can edit", like a shared Google Doc's
-  link setting. There are no private rooms, roles or read-only links yet.
-- Accounts don't send email: there's no email verification and no "forgot my
-  password" email (the server owner can reset one, see Deploying). Adding a mail
-  service (Postmark, Resend…) would enable both, plus sign-in links.
+- Rooms are "anyone with the link can edit" (with an account or as a guest), like
+  a shared Google Doc's link setting. There are no private rooms, roles or
+  read-only links yet.
+- Accounts have no email, so there's no "forgot my password" link: the server
+  owner can reset one (see Deploying). An email (for paid plans, receipts or
+  resets) can be added to accounts later without changing how sign-in works.
+- A guest's account lives in one browser's cookie: clearing it, or signing out,
+  loses access to the guest's projects (the projects themselves stay for
+  everyone else in them).
 - Accounts live in one JSON file, which is fine for a few thousand people; a
   bigger deployment should move `server/db.js` onto a real database.
 - Invites only reach friends who have coprod open (otherwise, send the link).
@@ -377,5 +388,5 @@ it prints a new password and signs them out everywhere.
    shares the audio, so everyone hears it.
 7. **FL Studio project import**: the .flp format is largely community-documented,
    so a "bring your FL beat into a shared room" importer is realistic.
-8. Private rooms and read-only share links; profile pictures; email
-   verification and password reset by email.
+8. Private rooms and read-only share links; profile pictures; an optional email
+   on accounts (for plans and password resets).

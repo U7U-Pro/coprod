@@ -8,8 +8,8 @@ import * as encoding from 'lib0/encoding';
 import * as decoding from 'lib0/decoding';
 import { startServer } from '../server/index.js';
 import { MSG_CHAT, cleanChat } from '../server/rooms.js';
-import { cleanEmail, cleanUsername, cleanName, hashPassword, checkPassword, Limiter } from '../server/auth.js';
-import { until, account, api, client, withCookie } from './helpers.js';
+import { cleanUsername, cleanName, hashPassword, checkPassword, Limiter } from '../server/auth.js';
+import { until, account, guest, api, client, withCookie } from './helpers.js';
 
 const fast = { roomOptions: { leaveGraceMs: 50, saveDelayMs: 20 } };
 
@@ -38,10 +38,8 @@ function chat(c) {
   return { got, say: (text, extra = {}) => send({ type: 'say', text, ...extra }), messages: () => got.filter((m) => m.type === 'message').map((m) => m.message) };
 }
 
-test('input rules: emails, usernames, names', () => {
-  assert.equal(cleanEmail('  Ana@Example.COM '), 'ana@example.com');
-  for (const bad of ['ana', 'ana@', '@x.com', 'a b@x.com', 'ana@x', `${'a'.repeat(250)}@x.com`]) assert.equal(cleanEmail(bad), null, bad);
-  assert.equal(cleanUsername('@Ana_99'), 'ana_99');
+test('input rules: usernames, names', () => {
+  assert.equal(cleanUsername(' @Ana_99 '), 'ana_99');
   for (const bad of ['ab', 'a'.repeat(21), 'ana!', 'an a']) assert.equal(cleanUsername(bad), null, bad);
   assert.equal(cleanName('  Ana   María  '), 'Ana María');
   assert.equal(cleanName('‮evil\u0007'), 'evil', 'no bidi overrides or control characters');
@@ -73,32 +71,34 @@ test('sign up, sign in, sessions, profile edits, password change', async (t) => 
   let srv = await startServer({ port: 0, dataDir });
   const anon = api(srv.port);
 
-  // Validation, one field at a time.
-  const signup = (body) => anon('POST', '/api/auth/signup', { email: 'ana@example.com', password: 'correct horse', name: 'Ana', username: 'ana', ...body });
-  assert.equal((await signup({ email: 'nope' })).body.field, 'email');
+  // Validation, one field at a time. No email anywhere: a username and a password.
+  const signup = (body) => anon('POST', '/api/auth/signup', { password: 'correct horse', name: 'Ana', username: 'ana', ...body });
   assert.equal((await signup({ password: 'short' })).body.field, 'password');
   assert.equal((await signup({ name: ' ' })).body.field, 'name');
   assert.equal((await signup({ username: 'x' })).body.field, 'username');
+  assert.match((await signup({ username: 'guest_ana' })).body.error, /kept for guests/);
   assert.deepEqual((await anon('GET', '/api/me')).body, { user: null });
 
-  const made = await signup({ name: 'Ana Lucía Fernández-Okafor', color: '#5ce1a3' });
+  const made = await signup({ name: 'Ana Lucía Fernández-Okafor', username: '@Ana', color: '#5ce1a3' });
   assert.equal(made.status, 201);
   assert.equal(made.body.user.name, 'Ana Lucía Fernández-Okafor');
-  assert.equal(made.body.user.email, 'ana@example.com');
+  assert.equal(made.body.user.username, 'ana');
+  assert.equal(made.body.user.guest, undefined);
   assert.equal(made.body.user.pass, undefined, 'the hash never leaves the server');
   const cookie = made.headers.get('set-cookie');
   assert.match(cookie, /coprod_session=[\w-]{40,}; Path=\/; HttpOnly; SameSite=Lax; Max-Age=2592000/);
   const ana = api(srv.port, cookie.split(';')[0]);
 
-  // Taken email (any case) and username.
-  assert.equal((await signup({ email: 'ANA@example.com', username: 'other' })).status, 409);
-  assert.equal((await signup({ email: 'other@example.com' })).body.field, 'username');
+  // A taken username (any case).
+  const taken = await signup({ username: 'ANA' });
+  assert.equal(taken.status, 409);
+  assert.equal(taken.body.field, 'username');
 
-  // Signing in.
-  const login = (email, password) => anon('POST', '/api/auth/login', { email, password });
-  assert.equal((await login('ana@example.com', 'wrong password')).status, 401);
-  assert.equal((await login('nobody@example.com', 'correct horse')).body.error, 'Wrong email or password', 'same answer for unknown emails');
-  const second = await login(' Ana@Example.com ', 'correct horse');
+  // Signing in, with the username however it's typed.
+  const login = (username, password) => anon('POST', '/api/auth/login', { username, password });
+  assert.equal((await login('ana', 'wrong password')).status, 401);
+  assert.equal((await login('nobody', 'correct horse')).body.error, 'Wrong username or password', 'same answer for unknown usernames');
+  const second = await login(' @ANA ', 'correct horse');
   assert.equal(second.status, 200);
   const other = api(srv.port, second.headers.get('set-cookie').split(';')[0]);
   assert.equal((await ana('GET', '/api/me')).body.user.username, 'ana');
@@ -116,7 +116,8 @@ test('sign up, sign in, sessions, profile edits, password change', async (t) => 
   assert.equal((await other('GET', '/api/me')).body.user, null, 'the other session ended');
   assert.equal((await other('GET', '/api/friends')).status, 401);
   assert.equal((await ana('GET', '/api/me')).body.user.username, 'ana_beats', 'this one stays');
-  assert.equal((await login('ana@example.com', 'battery staple')).status, 200);
+  assert.equal((await login('ana_beats', 'battery staple')).status, 200);
+  assert.equal((await login('ana', 'battery staple')).status, 401, 'the old username is free again');
 
   // A request from another site's page is refused even with the cookie.
   const csrf = await fetch(`http://localhost:${srv.port}/api/me`, {
@@ -166,10 +167,10 @@ test('friends: requests, live notifications, presence in sessions, profiles, inv
   const anaLive = await liveSocket(srv.port, ana.cookie);
   assert.equal(benLive.got[0].type, 'hello');
 
-  // Search: by username or name prefix, or exact email; never yourself.
+  // Search: by username, name, or any word of the name; never yourself.
   assert.deepEqual((await ana.call('GET', '/api/users?q=ben')).body.users.map((u) => u.user.username), ['ben']);
   assert.deepEqual((await ana.call('GET', '/api/users?q=okon')).body.users.map((u) => u.user.username), ['ben']);
-  assert.deepEqual((await ana.call('GET', '/api/users?q=cara@example.com')).body.users.map((u) => u.user.username), ['cara']);
+  assert.deepEqual((await ana.call('GET', '/api/users?q=@car')).body.users.map((u) => u.user.username), ['cara']);
   assert.deepEqual((await ana.call('GET', '/api/users?q=ana')).body.users, []);
 
   // Ana asks Ben (by username); Ben hears about it live.
@@ -177,7 +178,6 @@ test('friends: requests, live notifications, presence in sessions, profiles, inv
   const asked = await ana.call('POST', '/api/friends', { username: '@Ben' });
   assert.equal(asked.body.relation, 'requested');
   await until(() => benLive.got.some((m) => m.type === 'request' && m.from.username === 'ana'));
-  assert.equal(benLive.got.find((m) => m.type === 'request').from.email, undefined, 'no emails in notifications');
   assert.equal((await ana.call('POST', '/api/friends', { id: ben.user.id })).body.relation, 'requested', 'asking twice is harmless');
   const benFriends = (await ben.call('GET', '/api/friends')).body;
   assert.deepEqual(benFriends.incoming.map((r) => r.user.username), ['ana']);
@@ -346,4 +346,109 @@ test('the live socket needs a session too', async () => {
   assert.equal(hello.user.username, 'ana');
   ws.close();
   await srv.close();
+});
+
+test('guests: no password, can join and chat, can’t add friends, can become an account, gone when they sign out', async (t) => {
+  const dataDir = await mkdtemp(join(tmpdir(), 'coprod-'));
+  t.after(() => rm(dataDir, { recursive: true, force: true }));
+  let srv = await startServer({ port: 0, dataDir, ...fast });
+  const anon = api(srv.port);
+  const ana = await account(srv.port, 'Ana');
+  const cara = await guest(srv.port, '  Cara  ');
+  assert.equal(cara.user.guest, true);
+  assert.equal(cara.user.name, 'Cara');
+  assert.match(cara.user.username, /^guest_[a-z0-9]{6}$/);
+  assert.match((await guest(srv.port)).user.name, /^Guest \d{4}$/, 'a name is optional');
+  assert.equal((await cara.call('GET', '/api/me')).body.user.guest, true);
+
+  // Nobody can sign in as a guest: there's no password to guess.
+  for (const password of ['', 'null', 'correct horse']) {
+    assert.ok([400, 401].includes((await anon('POST', '/api/auth/login', { username: cara.user.username, password })).status));
+  }
+
+  // A guest joins a project, shows up and chats as themselves (marked as a guest).
+  const room = (await ana.call('POST', '/api/projects')).body.id;
+  const a = client(srv.port, room, ana.cookie);
+  const c = client(srv.port, room, cara.cookie);
+  const ac = chat(a);
+  const cc = chat(c);
+  await until(() => ac.got.some((m) => m.type === 'history') && cc.got.some((m) => m.type === 'history'));
+  c.provider.awareness.setLocalStateField('user', { name: 'Ana' });
+  await until(() => [...a.provider.awareness.getStates().values()].some((s) => s.user?.username === cara.user.username));
+  const seen = [...a.provider.awareness.getStates().values()].find((s) => s.user?.username === cara.user.username).user;
+  assert.deepEqual(seen, { id: cara.user.id, name: 'Cara', username: cara.user.username, color: cara.user.color, guest: true });
+  cc.say('hi from a guest');
+  await until(() => ac.messages().length === 1);
+  assert.equal(ac.messages()[0].user.name, 'Cara');
+  assert.equal(ac.messages()[0].user.guest, true);
+  assert.equal((await cara.call('GET', '/api/projects')).body.projects[0].id, room, 'on the guest’s own list');
+
+  // Friends: not with guests, either way; guests aren't in search.
+  assert.match((await cara.call('POST', '/api/friends', { id: ana.user.id })).body.error, /Guests can’t add friends/);
+  assert.match((await ana.call('POST', '/api/friends', { id: cara.user.id })).body.error, /is a guest/);
+  assert.deepEqual((await ana.call('GET', '/api/users?q=cara')).body.users, []);
+  assert.equal((await ana.call('GET', `/api/users/${cara.user.id}`)).body.user.guest, true);
+  assert.deepEqual((await cara.call('GET', '/api/friends')).body, { friends: [], incoming: [], outgoing: [] });
+
+  // A guest can rename themselves, but has no password to change and keeps their guest_ username.
+  assert.equal((await cara.call('PATCH', '/api/me', { name: 'Cara M.' })).body.user.name, 'Cara M.');
+  assert.equal((await cara.call('PATCH', '/api/me', { username: 'cara' })).body.field, 'username');
+  assert.equal((await cara.call('POST', '/api/me/password', { current: '', password: 'whatever123' })).status, 400);
+
+  // Creating an account: same person, same projects, now with a username and password.
+  assert.equal((await cara.call('POST', '/api/auth/upgrade', { username: 'guest_cara', password: 'battery staple' })).body.field, 'username');
+  assert.equal((await cara.call('POST', '/api/auth/upgrade', { username: 'ana', password: 'battery staple' })).status, 409);
+  assert.equal((await cara.call('POST', '/api/auth/upgrade', { username: 'cara', password: 'short' })).body.field, 'password');
+  const up = await cara.call('POST', '/api/auth/upgrade', { username: 'Cara', password: 'battery staple' });
+  assert.equal(up.status, 200);
+  assert.equal(up.body.user.username, 'cara');
+  assert.equal(up.body.user.guest, undefined);
+  assert.equal(up.body.user.id, cara.user.id, 'the same account');
+  assert.equal((await cara.call('GET', '/api/projects')).body.projects[0].id, room, 'projects come along');
+  assert.equal((await anon('POST', '/api/auth/login', { username: 'cara', password: 'battery staple' })).status, 200);
+  assert.equal((await ana.call('POST', '/api/friends', { id: cara.user.id })).body.relation, 'requested', 'now she can be added');
+  assert.equal((await cara.call('POST', '/api/auth/upgrade', { username: 'cara2', password: 'battery staple' })).status, 400, 'only once');
+  c.provider.awareness.setLocalStateField('user', { name: 'Cara M.' });
+  await until(() => [...a.provider.awareness.getStates().values()].some((s) => s.user?.username === 'cara' && !s.user.guest));
+
+  // A guest who signs out is gone: their account, session, and place in projects.
+  const dee = await guest(srv.port, 'Dee');
+  const d = client(srv.port, room, dee.cookie);
+  await until(async () => (await ana.call('GET', '/api/projects')).body.projects[0].with.some((u) => u.name === 'Dee'));
+  d.close();
+  assert.equal((await dee.call('POST', '/api/auth/logout')).status, 200);
+  assert.equal(srv.db.user(dee.user.id), null);
+  assert.equal((await dee.call('GET', '/api/me')).body.user, null);
+  assert.ok(!(await ana.call('GET', '/api/projects')).body.projects[0].with.some((u) => u.name === 'Dee'));
+
+  // Guests whose session ran out are cleared away (also when the server starts).
+  const old = await guest(srv.port, 'Old');
+  for (const s of srv.db.sessions.values()) if (s.user === old.user.id) s.expires = Date.now() - 1;
+  assert.equal(srv.db.pruneGuests(), 1);
+  assert.equal(srv.db.user(old.user.id), null);
+
+  // The rest survives a restart: the account Cara made, and guests still signed in.
+  a.close();
+  c.close();
+  const keep = await guest(srv.port, 'Still here');
+  await srv.close();
+  srv = await startServer({ port: 0, dataDir, ...fast });
+  assert.equal((await api(srv.port, cara.cookie)('GET', '/api/me')).body.user.username, 'cara');
+  assert.equal((await api(srv.port, keep.cookie)('GET', '/api/me')).body.user.name, 'Still here');
+  await srv.close();
+});
+
+test('accounts saved by the email version still sign in, by username, and lose the email', async (t) => {
+  const dataDir = await mkdtemp(join(tmpdir(), 'coprod-'));
+  t.after(() => rm(dataDir, { recursive: true, force: true }));
+  const pass = await hashPassword('correct horse');
+  const { writeFile } = await import('node:fs/promises');
+  const old = { version: 1, users: [{ id: 'uold', email: 'ana@example.com', username: 'ana', name: 'Ana', color: '#ff8a3d', bio: '', pass, created: 1, seen: 1 }], sessions: [], friends: [], requests: [], projects: [] };
+  await writeFile(join(dataDir, 'coprod.json'), JSON.stringify(old));
+  const srv = await startServer({ port: 0, dataDir });
+  const res = await api(srv.port)('POST', '/api/auth/login', { username: 'ana', password: 'correct horse' });
+  assert.equal(res.status, 200);
+  assert.equal(res.body.user.id, 'uold');
+  await srv.close();
+  assert.ok(!(await readFile(join(dataDir, 'coprod.json'), 'utf8')).includes('ana@example.com'));
 });

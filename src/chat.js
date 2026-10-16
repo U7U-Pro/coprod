@@ -186,6 +186,7 @@ export class Chat {
                 'div',
                 { class: 'chat-head' },
                 el('button', { type: 'button', class: 'chat-who', style: `--c:${m.user.color}`, onclick: (e) => this.hooks.openProfile(m.user, e.currentTarget) }, face(m.user, { size: 22 }), el('b', {}, m.user.name)),
+                m.user.guest ? el('span', { class: 'pill' }, 'guest') : null,
                 el('time', { class: 'hint', datetime: new Date(m.at).toISOString() }, clock(m.at)),
               ),
           el('p', { class: 'chat-text' }, ...formatText(m.text, me.username)),
