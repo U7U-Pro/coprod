@@ -18,6 +18,7 @@
     "@webaudiomodules/api": "^2.0.0-alpha.6",
     "@webaudiomodules/sdk": "^0.0.12",
     "lib0": "^0.2.119",
+    "wasm-media-encoders": "^0.7.0",
     "ws": "^8.22.0",
     "y-protocols": "^1.0.7",
     "y-websocket": "^3.1.0",

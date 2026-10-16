@@ -26,6 +26,7 @@ const MIME = {
   '.png': 'image/png',
   '.woff2': 'font/woff2',
   '.json': 'application/json',
+  '.wasm': 'application/wasm', // browsers only compile WebAssembly served as this
 };
 
 function json(res, status, body) {

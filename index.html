@@ -197,7 +197,7 @@
           </div>
           <button type="button" class="ghost" id="exCopr">Download .copr</button>
         </div>
-        <h3 class="picker-group">Audio (WAV)</h3>
+        <h3 class="picker-group">Audio</h3>
         <label>What to export
           <select id="exWhat">
             <option value="song">The song (patterns in the Song strip)</option>
@@ -219,14 +219,21 @@
             <option value="5">5 seconds</option>
           </select>
         </label>
-        <label>Format
-          <select id="exBits">
-            <option value="16">16-bit WAV (CD quality)</option>
-            <option value="24">24-bit WAV</option>
-            <option value="32">32-bit float WAV</option>
-          </select>
-        </label>
+        <div class="ex-format">
+          <label>Format
+            <select id="exFormat">
+              <option value="wav">WAV (lossless)</option>
+              <option value="mp3">MP3</option>
+              <option value="ogg">OGG Vorbis</option>
+            </select>
+          </label>
+          <label>Quality <select id="exQuality"></select></label>
+        </div>
         <p class="hint" id="exInfo"></p>
+        <div id="exProgress" class="ex-progress" hidden>
+          <div class="ex-bar" role="progressbar" aria-labelledby="exStatus" aria-valuemin="0" aria-valuemax="100"><span id="exBar"></span></div>
+          <p class="hint" id="exStatus" aria-live="polite"></p>
+        </div>
         <button class="primary" id="exGo">Export WAV</button>
         <button type="button" class="ghost" id="exCancel">Cancel</button>
       </form>

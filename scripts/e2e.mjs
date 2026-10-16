@@ -1028,6 +1028,111 @@ try {
   await opener.close();
   step(`Export → Download .copr saves "E2E jam.copr" (${(zipBytes.length / 1024).toFixed(0)} KB with its samples); opening it makes a new project with the same ${copy.channels.length} channels, notes and samples`);
 
+  // ---- Export: sounds like playback, MP3 and OGG, progress, cancel ------------
+  // Dee, a guest in a fresh project (the starter beat), so these settings don't touch the shared room.
+  const dee = await (await browser.newContext({ viewport: { width: 1280, height: 860 }, acceptDownloads: true })).newPage();
+  watch(dee, 'Dee');
+  await dee.goto(`http://localhost:${srv.port}/`);
+  await dee.click('#authGuest');
+  await dee.fill('#authName', 'Dee');
+  await dee.click('#authGo');
+  await dee.click('#homeNew');
+  await dee.waitForSelector('.row');
+  // Record what she hears for 4 loops of the pattern, then export the same 4 loops: every beat should be as loud.
+  const deeBpm = await dee.evaluate(() => window.coprod.ui.project.bpm);
+  const heard = await dee.evaluate(async (seconds) => {
+    const { engine } = window.coprod;
+    await engine.ensure();
+    const ctx = engine.ctx;
+    const src = `registerProcessor('rec', class extends AudioWorkletProcessor {
+      process(inputs) { const i = inputs[0]; if (i.length) this.port.postMessage({ f: currentFrame, l: i[0].slice() }); return true; }
+    });`;
+    await ctx.audioWorklet.addModule(URL.createObjectURL(new Blob([src], { type: 'text/javascript' })));
+    const rec = new AudioWorkletNode(ctx, 'rec', { numberOfInputs: 1, numberOfOutputs: 0 });
+    const chunks = [];
+    rec.port.onmessage = (e) => chunks.push(e.data);
+    engine.out.connect(rec);
+    await engine.play({ mode: 'pattern' });
+    const first = Math.round(engine.marks[0].time * ctx.sampleRate);
+    await new Promise((r) => setTimeout(r, (seconds + 0.6) * 1000));
+    engine.stop();
+    engine.out.disconnect(rec);
+    const n = Math.round(seconds * ctx.sampleRate);
+    const out = new Float32Array(n);
+    for (const c of chunks) for (let i = 0; i < c.l.length; i++) if (c.f + i - first >= 0 && c.f + i - first < n) out[c.f + i - first] = c.l[i];
+    return Array.from(out);
+  }, (4 * 16 * 15) / deeBpm);
+  const exportFrom = async (page, { format, quality, loops = '4', tail = '0' }) => {
+    await page.click('#exportBtn');
+    await page.selectOption('#exWhat', 'pattern');
+    await page.selectOption('#exLoops', loops);
+    await page.selectOption('#exTail', tail);
+    await page.selectOption('#exFormat', format);
+    await page.selectOption('#exQuality', quality);
+    const dl = page.waitForEvent('download', { timeout: 60000 });
+    await page.click('#exGo');
+    await page.waitForSelector('#exProgress:not([hidden])', { timeout: 5000 }).catch(() => {}); // (a short export can finish first)
+    const file = await dl;
+    return { name: file.suggestedFilename(), bytes: readFileSync(await file.path()) };
+  };
+  const deeWav = await exportFrom(dee, { format: 'wav', quality: '32' });
+  const fdv = new DataView(deeWav.bytes.buffer, deeWav.bytes.byteOffset, deeWav.bytes.byteLength);
+  const exported = Array.from({ length: (deeWav.bytes.length - 44) / 8 }, (_, i) => fdv.getFloat32(44 + i * 8, true)); // left channel
+  const sr = fdv.getUint32(24, true);
+  const beatDb = (x) => {
+    const len = Math.floor((60 / deeBpm) * sr);
+    return Array.from({ length: 16 }, (_, b) => {
+      let e = 0;
+      for (let i = b * len; i < (b + 1) * len; i++) e += (x[i] ?? 0) ** 2;
+      return 10 * Math.log10(e / len + 1e-12);
+    });
+  };
+  const liveDb = beatDb(heard);
+  const fileDb = beatDb(exported);
+  const worst = Math.max(...liveDb.map((v, i) => Math.abs(fileDb[i] - v)));
+  if (!(worst < 1.5)) throw new Error(`export loudness differs from playback by up to ${worst.toFixed(1)} dB per beat:\n live ${liveDb.map((v) => v.toFixed(1))}\n file ${fileDb.map((v) => v.toFixed(1))}`);
+  step(`The export matches playback: 16 beats, each within ${worst.toFixed(1)} dB of what Dee heard (beat 1 included: plugins warm up before the music)`);
+
+  // MP3 and OGG files that decode to the right length.
+  const decode = (bytes) =>
+    dee.evaluate(async (b64) => {
+      const buf = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0)).buffer;
+      const a = await window.coprod.engine.ctx.decodeAudioData(buf);
+      const d = a.getChannelData(0);
+      let e = 0;
+      for (let i = 0; i < d.length; i++) e += d[i] * d[i];
+      return { seconds: a.duration, rms: Math.sqrt(e / d.length) };
+    }, bytes.toString('base64'));
+  const bar = (16 * 15) / deeBpm;
+  for (const [format, quality] of [['mp3', '320'], ['ogg', '6']]) {
+    const f = await exportFrom(dee, { format, quality, loops: '1' });
+    const got = await decode(f.bytes);
+    if (!f.name.endsWith(`.${format}`) || Math.abs(got.seconds - bar) > 0.08 || !(got.rms > 0.01)) throw new Error(`${format}: ${f.name} decodes to ${got.seconds}s (want ${bar}s), rms ${got.rms}`);
+    step(`${format.toUpperCase()} export: "${f.name}" (${(f.bytes.length / 1024).toFixed(0)} KB) decodes to ${got.seconds.toFixed(3)} s for a ${bar.toFixed(3)} s bar, rms ${got.rms.toFixed(3)}`);
+  }
+  // Pick WAV again (the dialog remembers the format per person).
+  await dee.click('#exportBtn');
+  await dee.selectOption('#exFormat', 'wav');
+  await dee.click('#exCancel');
+
+  // A long export shows its progress and can be cancelled.
+  await dee.evaluate(() => window.coprod.S.setPattern(window.coprod.doc, window.coprod.ui.patternId, { bars: 32 }));
+  await dee.click('#exportBtn');
+  await dee.selectOption('#exLoops', '8');
+  await dee.selectOption('#exFormat', 'mp3');
+  let downloaded = false;
+  dee.once('download', () => (downloaded = true));
+  await dee.click('#exGo');
+  await dee.waitForFunction(() => /Rendering \d+:\d\d of \d+:\d\d/.test(document.getElementById('exStatus').textContent), null, { timeout: 15000 });
+  const progressText = await dee.textContent('#exStatus');
+  await (await dee.$('#exportModal .card')).screenshot({ path: `${SHOTS}0d-export-progress.png` });
+  await dee.click('#exCancel');
+  await dee.waitForFunction(() => document.getElementById('toast').textContent === 'Export cancelled');
+  await dee.waitForTimeout(800);
+  if (downloaded || (await dee.isDisabled('#exGo'))) throw new Error('cancelling didn’t stop the export');
+  step(`Exporting ${Math.round((32 * 8 * 16 * 15) / deeBpm / 60)} minutes of audio shows progress ("${progressText}"), and Cancel stops it`);
+  await dee.context().close();
+
   // A phone-sized third person, joining as a guest.
   const cara = await joinAsGuest('Cara', { width: 390, height: 844 });
   await cara.waitForFunction(() => document.querySelectorAll('#people .avatar').length === 3);

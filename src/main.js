@@ -16,7 +16,7 @@ import { ChannelPanel } from './channelpanel.js';
 import { AutomationPanel } from './automation.js';
 import { Playlist } from './playlist.js';
 import { CATALOG, communityPlugins, trustOrigin, nameFromUrl, pluginOrigin } from './plugins.js';
-import { renderProject, download } from './export.js';
+import { renderProject, download, exportLength, FORMATS } from './export.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -684,50 +684,149 @@ $('addChannel').onchange = (e) => {
   if (S.isSynth(inst)) openRoll(id);
 };
 
-// ------------------------------------------------------------------ WAV export
+// ------------------------------------------------------------------ audio export
+
+const exportPrefs = {
+  get: () => {
+    try {
+      return JSON.parse(store.get('coprod:export') ?? '{}') ?? {};
+    } catch {
+      return {};
+    }
+  },
+  set: (patch) => store.set('coprod:export', JSON.stringify({ ...exportPrefs.get(), ...patch })),
+};
+// Approximate bitrates (kbit/s) for the size estimate.
+const KBPS = { mp3: { 320: 320, 256: 256, 192: 192, 128: 128 }, ogg: { 8: 256, 6: 192, 4: 128 } };
+
+const clockTime = (s) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
+
+function exportOptions() {
+  return { what: $('exWhat').value, patternId: ui.patternId, loops: +$('exLoops').value, tail: +$('exTail').value, format: $('exFormat').value, quality: $('exQuality').value };
+}
 
 function exportSummary() {
   const p = ui.project;
-  const what = $('exWhat').value;
-  const steps = what === 'song' ? S.songLength(p) : +$('exLoops').value * currentPattern().bars * S.STEPS_PER_BAR;
+  const opts = exportOptions();
+  const { steps, seconds } = exportLength(p, opts);
   const bars = Math.ceil(steps / S.STEPS_PER_BAR);
-  const secs = (steps * 60) / p.bpm / 4 + +$('exTail').value;
-  $('exInfo').textContent = `${bars} bar${bars === 1 ? '' : 's'} at ${p.bpm} BPM ≈ ${secs.toFixed(1)} s. Mutes and your solos apply.`;
-  $('exLoopsRow').hidden = what === 'song';
+  const sr = engine.ctx?.sampleRate ?? 48000;
+  const bytes = opts.format === 'wav' ? (seconds * sr * 2 * +opts.quality) / 8 : (seconds * (KBPS[opts.format][opts.quality] ?? 192) * 1000) / 8;
+  const size = bytes > 1e6 ? `${(bytes / 1e6).toFixed(1)} MB` : `${Math.max(1, Math.round(bytes / 1e3))} KB`;
+  const loopNote = opts.format === 'mp3' && opts.tail === 0 ? ' Every MP3 starts with a short silence (a few hundredths of a second), so for seamless loops use WAV or OGG.' : '';
+  const length = seconds < 60 ? `${seconds.toFixed(1)} s` : clockTime(seconds);
+  $('exInfo').textContent = `${bars} bar${bars === 1 ? '' : 's'} at ${p.bpm} BPM ≈ ${length}, about ${size}. Mutes and your solos apply.${loopNote}`;
+  $('exLoopsRow').hidden = opts.what === 'song';
+  if (!exporting) $('exGo').textContent = `Export ${FORMATS[opts.format].ext.toUpperCase()}`;
+}
+
+/** The quality menu for the chosen format (remembering the last choice for each). */
+function fillQualities() {
+  const format = $('exFormat').value;
+  $('exQuality').replaceChildren(...FORMATS[format].qualities.map(([value, label]) => new Option(label, value)));
+  const saved = exportPrefs.get()[`quality:${format}`];
+  $('exQuality').value = FORMATS[format].qualities.some(([v]) => v === saved) ? saved : FORMATS[format].qualities[0][0];
+}
+
+const roughly = (s) => (s < 60 ? `${Math.max(1, Math.round(s))} s` : `${Math.round(s / 60)} min`);
+
+let exporting = null; // the running export's AbortController
+let progressShown = { at: 0, overall: 0 };
+/** One bar for the whole export: loading 0-3%, rendering, then encoding (longer for MP3/OGG). */
+function showExportProgress(p, format) {
+  const now = performance.now();
+  if (p.phase === progressShown.phase && p.fraction !== 1 && now - progressShown.at < 100) return; // ~10 updates a second
+  const encodeShare = format === 'wav' ? 0.02 : 0.12;
+  const bar = $('exBar').parentElement;
+  bar.classList.toggle('unknown', p.phase === 'rendering' && p.fraction == null);
+  let overall = progressShown.overall;
+  let text;
+  if (p.phase === 'loading') {
+    overall = p.total ? (0.03 * p.done) / p.total : 0;
+    text = p.total ? `Loading plugins and samples… ${p.done} of ${p.total}` : 'Getting ready…';
+  } else if (p.phase === 'rendering') {
+    if (p.fraction == null) text = 'Rendering… (this browser can’t say how far along it is)';
+    else {
+      overall = 0.03 + (0.97 - encodeShare) * p.fraction;
+      text = p.rendered > 0 ? `Rendering ${clockTime(p.rendered)} of ${clockTime(p.seconds)}${p.eta > 2 ? ` · about ${roughly(p.eta)} left` : ''}` : 'Warming up the plugins…';
+    }
+  } else {
+    overall = 1 - encodeShare * (1 - p.fraction);
+    text = format === 'wav' ? 'Writing the file…' : `Encoding ${FORMATS[format].ext.toUpperCase()}… ${Math.round(p.fraction * 100)}%`;
+  }
+  overall = Math.max(progressShown.overall, Math.min(1, overall)); // never goes backwards
+  progressShown = { at: now, overall, phase: p.phase };
+  $('exProgress').hidden = false;
+  $('exBar').style.width = `${(overall * 100).toFixed(1)}%`;
+  bar.setAttribute('aria-valuenow', String(Math.round(overall * 100)));
+  $('exStatus').textContent = text;
+}
+
+function setExportBusy(on) {
+  $('exportForm').classList.toggle('busy', on);
+  $('exGo').disabled = on;
+  $('exCopr').disabled = on;
+  $('exCancel').textContent = on ? 'Cancel export' : 'Cancel';
+  if (on) $('exGo').textContent = 'Exporting…';
+  else {
+    $('exProgress').hidden = true;
+    $('exBar').style.width = '0';
+    progressShown = { at: 0, overall: 0 };
+    exportSummary();
+  }
 }
 
 $('exportBtn').onclick = () => {
   const songOpt = $('exWhat').options[0];
   songOpt.disabled = !ui.project.clips.length;
   if (songOpt.disabled) $('exWhat').value = 'pattern';
+  const prefs = exportPrefs.get();
+  if (FORMATS[prefs.format]) $('exFormat').value = prefs.format;
+  fillQualities();
   exportSummary();
-  $('exGo').disabled = false;
-  $('exGo').textContent = 'Export';
   $('exportModal').hidden = false;
 };
 for (const id of ['exWhat', 'exLoops', 'exTail']) $(id).onchange = exportSummary;
-$('exCancel').onclick = () => ($('exportModal').hidden = true);
+$('exFormat').onchange = () => {
+  exportPrefs.set({ format: $('exFormat').value });
+  fillQualities();
+  exportSummary();
+};
+$('exQuality').onchange = () => {
+  exportPrefs.set({ [`quality:${$('exFormat').value}`]: $('exQuality').value });
+  exportSummary();
+};
+function cancelOrCloseExport() {
+  if (exporting) exporting.abort();
+  else $('exportModal').hidden = true;
+}
+$('exCancel').onclick = cancelOrCloseExport;
 $('exportForm').onsubmit = async (e) => {
   e.preventDefault();
-  $('exGo').disabled = true;
-  $('exGo').textContent = 'Rendering…';
+  if (exporting) return;
+  const controller = (exporting = new AbortController());
+  const opts = exportOptions();
+  setExportBusy(true);
+  showExportProgress({ phase: 'loading', done: 0, total: 0 }, opts.format);
   try {
+    // Export renders the shared state: stop playback (automation is moving knobs) and save any knob still waiting.
+    if (engine.playing) {
+      engine.stop();
+      document.body.classList.remove('playing');
+    }
     await engine.ensure();
-    const res = await renderProject(
-      ui.project,
-      { what: $('exWhat').value, patternId: ui.patternId, loops: +$('exLoops').value, tail: +$('exTail').value, bits: +$('exBits').value },
-      engine,
-    );
-    const name = `${(ui.project.title || 'coprod').replace(/[^\w .-]+/g, '_')}.wav`;
+    await channelPanel.flush();
+    const res = await renderProject(ui.project, opts, engine, { signal: controller.signal, onProgress: (p) => showExportProgress(p, opts.format) });
+    const name = `${(ui.project.title || 'coprod').replace(/[^\w .-]+/g, '_')}.${res.ext}`;
     download(res.blob, name);
     $('exportModal').hidden = true;
     const peak = Number.isFinite(res.peak) ? `peak ${res.peak.toFixed(1)} dBFS${res.peak > -0.1 ? ' (clipping: turn something down)' : ''}` : 'silent';
     toast(`Exported ${name}: ${res.seconds.toFixed(1)} s, ${peak}${res.problems.length ? `. Left out: ${res.problems.join(', ')}` : ''}`);
   } catch (err) {
-    toast(`Export failed: ${err.message}`);
+    toast(err.name === 'ExportCancelled' ? 'Export cancelled' : `Export failed: ${err.message}`);
   } finally {
-    $('exGo').disabled = false;
-    $('exGo').textContent = 'Export';
+    exporting = null;
+    setExportBusy(false);
   }
 };
 
@@ -966,7 +1065,7 @@ window.addEventListener('keydown', (e) => {
     undo.redo();
   } else if (e.key === 'Escape') {
     if (!$('picker').hidden) $('picker').hidden = true;
-    else if (!$('exportModal').hidden) $('exportModal').hidden = true;
+    else if (!$('exportModal').hidden) cancelOrCloseExport();
     else if (!$('inviteModal').hidden) $('inviteModal').hidden = true;
     else if (!$('profileModal').hidden) $('profileModal').hidden = true;
     else if (chat.isOpen) chat.close();

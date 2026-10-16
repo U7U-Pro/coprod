@@ -2276,3 +2276,58 @@ body.dropping .drop-hint {
 .me-button .pill {
   flex: none;
 }
+
+/* ---------------------------------------------------------------- export progress */
+
+.ex-format {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.ex-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.ex-bar {
+  height: 8px;
+  border-radius: 999px;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  overflow: hidden;
+}
+
+.ex-bar span {
+  display: block;
+  height: 100%;
+  width: 0;
+  background: var(--accent);
+  border-radius: inherit;
+  transition: width 0.2s;
+}
+
+/* No progress to show (a browser without OfflineAudioContext.suspend): a moving stripe. */
+.ex-bar.unknown span {
+  width: 30%;
+  animation: ex-sweep 1.2s ease-in-out infinite alternate;
+}
+
+@keyframes ex-sweep {
+  from {
+    margin-left: 0;
+  }
+  to {
+    margin-left: 70%;
+  }
+}
+
+#exStatus {
+  font-variant-numeric: tabular-nums;
+}
+
+#exportForm.busy select {
+  opacity: 0.6;
+  pointer-events: none;
+}

@@ -62,6 +62,7 @@ export class Engine {
     this.master = ctx.createGain();
     this.master.gain.value = 0.8;
     this.master.connect(comp).connect(ctx.destination);
+    this.out = comp; // the very end of the mix (what reaches the speakers or the file)
     this.ctx = ctx;
     if (this.project) this.setProject(this.project);
   }
@@ -321,14 +322,15 @@ export class Engine {
     return s ? { status: s.status, error: s.error, url: s.url } : { status: this.ctx ? 'loading' : 'idle' };
   }
 
-  sendTransport(only) {
+  /** Tell plugins the tempo and whether we're playing; `start` is when bar 1 begins (default: now). */
+  sendTransport(only, start = this.ctx?.currentTime) {
     if (!this.ctx || !this.project) return;
     const event = {
       type: 'wam-transport',
       time: this.ctx.currentTime,
       data: {
         currentBar: 0,
-        currentBarStarted: this.ctx.currentTime,
+        currentBarStarted: start,
         tempo: this.project.bpm,
         timeSigNumerator: 4,
         timeSigDenominator: 4,

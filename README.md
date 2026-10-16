@@ -175,11 +175,23 @@ npm start          # serves dist/ and the sync socket on $PORT (default 3000)
 - **Undo/redo is per person**: Ctrl+Z undoes *your* last edit, never someone else's.
 - **Offline-tolerant**: if your connection drops you can keep editing; changes
   merge when you reconnect.
-- **WAV export** (top bar): the song or the current pattern (looped 1-8 times),
-  with an optional tail for reverb, as 16-bit, 24-bit or 32-bit float. It renders
-  offline (faster than real time) with fresh copies of every plugin, so it sounds
-  like playback. Mutes and your solos apply; files start exactly on the beat, so a
-  tail-less pattern export loops cleanly.
+- **Audio export** (top bar → Export): the song or the current pattern (looped
+  1-8 times), with an optional tail for reverb, as **WAV** (16-bit, 24-bit or
+  32-bit float), **MP3** (320, 256, 192 or 128 kbps) or **OGG Vorbis** (q8, q6,
+  q4). The dialog remembers your format and estimates the file size.
+  - It renders offline (usually much faster than real time) with fresh copies of
+    every plugin. Each render starts with 2 seconds of silence that's cut off,
+    so plugins settle (e.g. Grey Hole's delay glides in) before the music, the
+    way they have by the time you press play. Notes and automation go out a
+    slice at a time, a little ahead, exactly like playback. Measured: every beat
+    of an export is within about half a decibel of what you hear.
+  - A progress bar shows loading, rendering ("1:12 of 3:40 · about 40 s left")
+    and encoding, and **Cancel** stops it. Encoding runs in the background, so
+    the page never freezes. Starting an export stops playback and saves any
+    plugin knob you just turned.
+  - Mutes and your solos apply. WAV and OGG files start exactly on the beat, so a
+    tail-less pattern export loops cleanly; every MP3 starts with a short
+    silence (a few hundredths of a second, from the encoder).
 - Space plays and stops; Esc closes the piano roll (or the chat, or stops following).
 
 ## Where projects are saved
@@ -277,7 +289,14 @@ as someone else.
   `F0 7D 4E 50 <note> <msb> <lsb> F7`, the note's offset in cents + 8192. Plugins
   whose descriptor has `notePitch: true` (coprod's own) bend just that note; other
   plugins get channel pitch bend instead.
-- `src/export.js`, `src/wav.js`: offline rendering and WAV encoding.
+- `src/export.js`: offline rendering (warm-up, sliced scheduling, progress,
+  cancel). `src/encode.js` (run in `src/encode-worker.js`): WAV (`src/wav.js`),
+  MP3 and OGG encoding with the reference LAME and Vorbis encoders compiled to
+  WebAssembly ([wasm-media-encoders](https://github.com/arseneyr/wasm-media-encoders)).
+  Their `.wasm` files only download when someone exports in that format.
+  **LAME is LGPL**: it ships as its own replaceable file (`mp3.wasm`). If you
+  distribute coprod, keep it that way and point to its source (the
+  wasm-media-encoders repository), like with Dexed below.
 - `plugins/dexed/`: the Dexed port: Dexed's engine source (GPLv3), the small shims
   that replace JUCE, a C interface (`dexed_wasm.cpp`), and `build.sh` to rebuild
   `public/wam/dexed/dexed.wasm` with clang's WebAssembly target. **Dexed is GPLv3**:

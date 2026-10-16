@@ -90,6 +90,13 @@ export class ChannelPanel {
     if (state) this.actions.saveState(key, state);
   }
 
+  /** Save knob changes that are still waiting to be saved (before an export renders the shared state). */
+  async flush() {
+    for (const timer of this.pending.values()) clearTimeout(timer);
+    this.pending.clear();
+    await Promise.all([...this.guis.keys()].map((key) => this.capture(key)));
+  }
+
   unmountAll() {
     for (const [key, g] of this.guis) this.unmount(key, g);
   }

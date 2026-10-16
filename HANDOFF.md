@@ -181,10 +181,11 @@ in src/, server/ and Vertex.
   - Built-in instruments use their range setting (1, 2, 3, 5, 7, 12 or 24 semitones).
   - WAM plugins get 14-bit MIDI 0xE0 and use their own range.
   - Measured in an export: 441.7 Hz rose to 493.8 Hz.
-- **WAV export:**
-  - Song or pattern, with loop count, tail length and 16/24/32-float bit depth.
-  - Offline render includes plugins (Vertex and Dexed).
-  - The compressor latency is measured and trimmed, so the file is loop-aligned.
+- **Audio export (WAV, MP3, OGG):**
+  - Song or pattern, with loop count and tail length; WAV 16/24/32-float, MP3 CBR 320/256/192/128, OGG Vorbis q8/q6/q4 (`src/formats.js`; encoding in `src/encode-worker.js`).
+  - Offline render includes plugins (Vertex and Dexed), after a 2 s warm-up, with live-like sliced scheduling (see "Audio export" under gotchas).
+  - Progress (loading, rendering with time left, encoding) and Cancel. Export stops playback and flushes pending plugin state first (`ChannelPanel.flush`).
+  - The compressor latency is measured and trimmed, so WAV and OGG files are loop-aligned (MP3 has encoder delay).
 
 **Never verified:**
 - Sound quality by ear.
@@ -239,10 +240,15 @@ in src/, server/ and Vertex.
 - Rebuilding the channel panel cancelled knob drags. `ChannelPanel.render` now checks a signature first.
 - Editor knob registrations leaked. They are now scoped.
 
-### WAV export
-- A 50 ms lead-in broke loop alignment (lead is 0 now).
+### Audio export
+- A 50 ms lead-in broke loop alignment. Now a 2 s warm-up (a whole number of render quanta) is rendered first and cut off together with the compressor delay, so beat 1 is still at sample 0.
 - The master compressor's look-ahead (about 6 ms in Chrome) is measured and trimmed.
-- Plugin worklets need about **150 ms** after `engine.ready()` before `startRendering`, or Vertex and Dexed render silence.
+- Plugin worklets need about **150 ms** after the plugins load before `startRendering`, or Vertex and Dexed render silence.
+- **Cold plugins (fixed):** a fresh plugin glides its knobs from their defaults. Grey Hole's Faust `si.smooth(0.9999)` on delayTime and size sweeps from 0 for about 1 s at 0.9 feedback, so the old export (music at frame 0) piled up and the master compressor then ducked the whole song. Measured with Grey Hole on Keys: +3.3 dB on beat 1 and −2.7 dB on beat 4 before; within 0.5 dB on every beat after. Built-ins alone were −2.5 dB on beat 1 (the bus-gain glide); now +0.4.
+- **Everything up front (fixed):** the old export scheduled the whole song before rendering, which blocked the page on long songs and fed timestamp-ignoring plugins every event at once. Now `OfflineAudioContext.suspend()` runs every 0.1 s of render time and schedules the next slice 0.05 s ahead, like playback. That's about 2,500 suspends for 4 minutes, cheap: 4 min with Vertex, Dexed and Acid renders in about 8 s here. Without `suspend()` it falls back to scheduling everything up front, with no progress.
+- **`.wasm` MIME type:** the server sent `.wasm` as octet-stream, and `WebAssembly.compileStreaming` refuses that, so MP3/OGG export failed in production builds (Vite dev was fine). The server now sends `application/wasm`, and the worker fetches the bytes itself, so a misconfigured host still works.
+- **MP3 is CBR only:** wasm-media-encoders writes no Xing/Info header, and without one, players misreport a VBR file's length.
+- **Grey Hole from npm:** `npm pack wam-community` has the community plugins. Its `sdk-parammgr/src/sdk` is a missing symlink to `utils/sdk`, so a local test server must map it (the hosted site has it).
 
 ### e2e
 - HTML5 drag-and-drop needs both elements visible, so that step uses a tall viewport.
